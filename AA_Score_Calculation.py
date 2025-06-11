@@ -74,7 +74,7 @@ class Embed_Mols:
         self.trajectory_dirs = self.gl.trajectory_dirs
         self.conf = config
         self.outdir = self.conf['OUTPUT']['directory']
-        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join('logs', 'aascore.log'))
+        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.conf['OUTPUT']['directory'], self.conf['OUTPUT']['logs_dir'], 'AAScore.log'))
 
     def run(self):
         #for trajectory_dir in self.trajectory_dirs:
@@ -82,11 +82,19 @@ class Embed_Mols:
         
         for rank_dir in self.gl.rank_output_dirs:
             print(rank_dir)
-            output_rank_dir = os.path.join(self.outdir, rank_dir)
+            output_rank_dir = rank_dir
+            trajectory_name = output_rank_dir.split("/")[-2].split("_")[0]
+            trajectory_num = output_rank_dir.split("/")[-2].split("_")[1]
+            rdir = output_rank_dir.split("/")[-1]
             csv_path = os.path.join(output_rank_dir, 'results.csv')
-            output_path_prefix = os.path.join(output_rank_dir, 'lead')
-            trajectory_name, trajectory_num = _parse_trajectory_name(self.trajectory_dirs[0])
-            input_compound_file = self.gl.input_compound_files[int(trajectory_num)]
+            output_path_prefix = os.path.join(self.conf['OUTPUT']['directory'], self.conf['AAScore']['working_directory'], trajectory_name+'_'+trajectory_num, rdir, 'lead')
+            os.makedirs(os.path.join(self.conf['OUTPUT']['directory'], self
+.conf['AAScore']['working_directory'], trajectory_name+'_'+trajectory_num, rdir), exist_ok=True)
+
+            #output_path_prefix = os.path.join(output_rank_dir, 'lead')
+            input_compound_file = os.path.join(self.outdir, self.conf['SINCHO']['working_directory'], trajectory_name+'_'+trajectory_num, 'lig_'+trajectory_num+'.pdb')
+            print(input_compound_file)
+            #input_compound_file = self.gl.input_compound_files[int(trajectory_num)]
 
             # 全生成結果から化合物を任意の数選択し、さらにそれらのコンフォーマーを生成
             # コンフォーマーはmol2形式で保存
@@ -104,7 +112,9 @@ class Embed_Mols:
         choise_method = aascore_conf['method']
         reward_cutoff = aascore_conf['reward_cutoff']
         num_of_cpd = aascore_conf['num_of_cpd']
+        noc_order_scale = int(len(str(int(num_of_cpd)))+1)
         conf_per_cpd = aascore_conf['conf_per_cpd']
+        cpc_order_scale = int(len(str(int(conf_per_cpd)))+1)
         
         # 立ち上げの基準となるligand
         lig = Chem.MolFromPDBFile(ligand_pdb)
@@ -133,7 +143,10 @@ class Embed_Mols:
         df.drop('mols', axis=1).reset_index(drop=False).to_csv(os.path.join(os.path.dirname(csv), 'choise_to_docking.csv'))
 
         # create ID
-        df['ChemTS_idx'] = ['ChemTS_%06d' % i for i in range(len(df))]
+        df_rows_scale = int(len(str(len(df)))+1)
+        if choise_method == 'all':
+            noc_order_scale = df_rows_scale
+        df['ChemTS_idx'] = ['ChemTS_'+str(i).zfill(df_rows_scale) for i in range(len(df))]
 
         # Add hidrogen
         df['mhs'] = [Chem.AddHs(m) for m in df['mols']]
@@ -147,10 +160,12 @@ class Embed_Mols:
         # img.save(os.path.join(os.path.dirname(csv), 'mols.png'))
 
         # write structure
-        out_cols = list(df.columns)
+/home/sincho_dev/work/AI-H2L/20250603_WF/AI-H2L-System/out/250529_6Z0R/04_DeltaGEst/trajectory_00/rank_00        out_cols = list(df.columns)
         out_cols.remove('mhs')
-        PandasTools.SaveXlsxFromFrame(df[out_cols], output_path_prefix + '.xlsx',
-                                      molCol='mols', size=(150, 150))
+        if 'mols' in df.columns and df['mols'].notna().any():
+            PandasTools.SaveXlsxFromFrame(df[out_cols], output_path_prefix + '.xlsx', molCol='mols', size=(150, 150))
+        else:
+            print("Mol column is missing or empty – skipping SaveXlsxFromFrame")
 
         # calc 3D structures
         for idx, row in df.iterrows():
@@ -178,17 +193,16 @@ class Embed_Mols:
                 self.logger.error(f"エラーが発生しました: {e}")
                 self.logger.error(f"embed error.")
                 continue
-
             for n, mol in enumerate(conformers):
-                mol.SetProp('_Name', row['ChemTS_idx'] + '_' + 'conformers_' + str(n).zfill(3))
+                mol.SetProp('_Name', row['ChemTS_idx'] + '_' + 'conformers_' + str(n).zfill(cpc_order_scale))
 
             df_conformers = pd.DataFrame({'conformers':conformers, 'energy':energies})
             df_conformers = pd.concat([df_conformers, pd.concat([row.to_frame().T ] * len(df_conformers), ignore_index=True)], axis=1)
-            df_conformers['_Name'] =  [f"{value}_{str(n).zfill(3)}" for n, value in enumerate(df_conformers['ChemTS_idx'], start=0)]
+            df_conformers['_Name'] =  [f"{value}_{str(n).zfill(cpc_order_scale)}" for n, value in enumerate(df_conformers['ChemTS_idx'], start=0)]
             
             # 1分子に対して、複数コンフォーマーのmol2保存
             # write to args.sdf
-            output_dir = f'{output_path_prefix}_{idx:03d}'
+            output_dir = f'{output_path_prefix}_{str(idx).zfill(noc_order_scale)}'
             os.makedirs(output_dir, exist_ok = True)
             sdf_name = os.path.join(output_dir, 'conformers.sdf')
             PandasTools.WriteSDF(df_conformers, sdf_name, molColName='conformers',
@@ -196,7 +210,7 @@ class Embed_Mols:
 
             conformers_output_dir = os.path.join(output_dir, 'conformers')
             for i, pbmol in enumerate(pybel.readfile('sdf', sdf_name)):
-                mol2_name = f'{conformers_output_dir}_{i:03d}.mol2'
+                mol2_name = f'{conformers_output_dir}_{str(i).zfill(cpc_order_scale)}.mol2'
                 pbmol.write('mol2', mol2_name, overwrite=True)
                 subprocess.run(['obabel', '-imol2', mol2_name,'-opdb', '-O', mol2_name.replace('mol2','pdb')])
 
@@ -386,23 +400,24 @@ class AA_Score:
         self.gl = generate_lead
         self.conf = config
         self.output_dir = self.conf['OUTPUT']['directory'] 
-        self.aascore_output_dirname = self.conf['AAScore']['OUTPUT']['directory']
-        self.aascore_output_filename = self.conf['AAScore']['OUTPUT']['filename']
+        
+        self.aascore_output_dirname = os.path.join(self.output_dir, self.conf['AAScore']['working_directory'])
+        #self.aascore_output_dirname = self.conf['AAScore']['OUTPUT']['directory']
+        self.aascore_output_filename = 'scores.txt'
+        #self.aascore_output_filename = os.path.join(self.aascore_output_dirname, 'scores.txt')
+        #self.aascore_output_filename = self.conf['AAScore']['OUTPUT']['filename']
         self.generate_dir = os.path.join(self.conf['OUTPUT']['directory'],
-                                         self.conf['GENERATE_WORKFLOW']['working_directory'],
-                                         self.conf['ChemTS']['prefix'])
-        self.aascore_outdir = self._get_aascore_output_dir()
+                                         self.conf['ChemTS']['working_directory']
+                                         )
+        self.aascore_outdir = self.aascore_output_dirname
 
         self.output_files = []
         self.rank_output_dir = []
         self.max_workers = self.conf['AAScore']['parallel_num']
         self.SDF_output_num = self.conf['AAScore']['output_num']           
         self.SDF_name_prefix = self.conf['AAScore']['OUTPUT']['sdf_name_prefix']
-        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join('logs', 'aascore.log'))
+        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.output_dir, self.conf['OUTPUT']['logs_dir'], 'AAScore.log'))
 
-    def _get_aascore_output_dir(self):
-        """AAScoreの出力ディレクトリを取得"""
-        return os.path.join(self.output_dir , self.aascore_output_dirname)
 
     def _get_generate_dir(self, trajectory_name):
         """生成ディレクトリを取得"""
@@ -424,7 +439,7 @@ class AA_Score:
             shutil.copy(file, dest_dir)
 
     def run(self):
-        self.aascore_outdir = self._get_aascore_output_dir()
+        self.aascore_outdir = self.aascore_output_dirname
         os.makedirs(self.aascore_outdir, exist_ok = True)
 
         for trajectory_dir in self.gl.trajectory_dirs:
@@ -445,24 +460,28 @@ class AA_Score:
             extract_residues_within_distance(protein_pdb, compound_pdb, pocket_pdb_path, distance=distance)
 
             rank_num = len(os.listdir(generate_tra_dir))
-            for rank in range(rank_num):
+            order_scale = int(len(str(int(rank_num)))+1)
+            for r in range(rank_num):
+                rank = str(r).zfill(order_scale)
                 self._process_rank(generate_tra_dir, aascore_tra_dir, rank, pocket_pdb_path)
             
     def _process_rank(self, generate_tra_dir, aascore_tra_dir, rank, pocket_pdb_path):
-        rank_name = f'rank_{str(rank).zfill(3)}'
+        rank_name = f'rank_{str(rank)}'
         generate_tra_rank_dir = os.path.join(generate_tra_dir, rank_name)
         aascore_tra_rank_dir = os.path.join(aascore_tra_dir, rank_name)
         os.makedirs(aascore_tra_rank_dir, exist_ok=True)
 
         self.rank_output_dir.append(aascore_tra_rank_dir)
 
-        lead_paths = glob(os.path.join(generate_tra_rank_dir, 'lead_*'))
+        lead_paths = glob(os.path.join(aascore_tra_rank_dir, 'lead_*'))
+        #lead_paths = glob(os.path.join(generate_tra_rank_dir, 'lead_*'))
         lead_num = len(lead_paths)
+        lead_order_scale = int(len(str(int(lead_num)))+1) 
         aascore_output_file_paths = []
 
         task_list = []
         for lead in range(lead_num):
-            lead_name = f'lead_{str(lead).zfill(3)}'
+            lead_name = f'lead_{str(lead).zfill(lead_order_scale)}'
             generate_tra_rank_lead_dir = os.path.join(generate_tra_rank_dir, lead_name)
             aascore_tra_rank_lead_dir = os.path.join(aascore_tra_rank_dir, lead_name)
             os.makedirs(aascore_tra_rank_lead_dir, exist_ok=True)
@@ -470,13 +489,13 @@ class AA_Score:
             aascore_output_file_paths.append(aascore_output_file_path)
 
             # lead.sdfのパスを取得
-            sdf_paths = glob(os.path.join(generate_tra_rank_lead_dir, '*.sdf'))
+            sdf_paths = glob(os.path.join(aascore_tra_rank_lead_dir, '*.sdf'))
             if not sdf_paths:
                 self.logger.error(f'No conf sdf in {generate_tra_rank_lead_dir}.')
                 continue
 
             lead_sdf_path = sdf_paths[0]
-            shutil.copy(lead_sdf_path, aascore_tra_rank_lead_dir)
+            #shutil.copy(lead_sdf_path, aascore_tra_rank_lead_dir)
 
             task_list.append((pocket_pdb_path, lead_sdf_path, aascore_output_file_path))
         self.output_files.append(aascore_output_file_paths)
@@ -505,6 +524,14 @@ class AA_Score:
         poc = os.path.abspath(pocket_pdb_path)
         lig = os.path.abspath(lead_sdf_path)
         log = os.path.abspath(aascore_output_file_path)
+        print("##############################")
+        print("##############################")
+        print("##############################")
+        print(poc, lig, cwd)
+        print(log)
+        print("##############################")
+        print("##############################")
+        print("##############################")
         os.chdir('/AA-Score-Tool')
         os.system("python AA_Score.py --Rec "+poc+" --Lig "+lig+" --Out "+log)
         self.logger.info(f'{lead_sdf_path} done.')
