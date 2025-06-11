@@ -160,7 +160,7 @@ class Embed_Mols:
         # img.save(os.path.join(os.path.dirname(csv), 'mols.png'))
 
         # write structure
-/home/sincho_dev/work/AI-H2L/20250603_WF/AI-H2L-System/out/250529_6Z0R/04_DeltaGEst/trajectory_00/rank_00        out_cols = list(df.columns)
+        out_cols = list(df.columns)
         out_cols.remove('mhs')
         if 'mols' in df.columns and df['mols'].notna().any():
             PandasTools.SaveXlsxFromFrame(df[out_cols], output_path_prefix + '.xlsx', molCol='mols', size=(150, 150))
