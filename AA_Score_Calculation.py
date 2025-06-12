@@ -36,18 +36,14 @@ def extract_residues_within_distance(protein_pdb, compound_pdb, output_pdb, dist
     parser = PDBParser(QUIET=True)
     protein_structure = parser.get_structure('protein', protein_pdb)
     compound_structure = parser.get_structure('compound', compound_pdb)
-
     protein_atoms = list(protein_structure.get_atoms())
     compound_atoms = list(compound_structure.get_atoms())
-
     neighbor_search = NeighborSearch(protein_atoms)
     close_residues = set()
-
     for atom in compound_atoms:
         close_atoms = neighbor_search.search(atom.coord, distance)
         for close_atom in close_atoms:
             close_residues.add(close_atom.get_parent())
-
     accept_residues = ["ALA","GLY","VAL","LEU","ILE","MET","PHE","TYR","TRP","PRO",
                        "SER","THR","CYS","ASN","GLN","ASP","GLU","LYS","ARG","HIS"]
     convert_residues = {"HIE":"HIS", "HID":"HIS", "HIP":"HIS", "CYX":"CYS", "CYM":"CYS",
@@ -56,13 +52,12 @@ def extract_residues_within_distance(protein_pdb, compound_pdb, output_pdb, dist
     for residue in close_residues:
         if residue.get_resname() in convert_residues:
             residue.resname = convert_residues[residue.get_resname()]
-        # if residue.get_resname() not in accept_residues:
-        #     close_residues.remove(residue)
+        if residue.get_resname() not in accept_residues:
+            close_residues.remove(residue)
     close_residues = {
         residue for residue in close_residues
         if residue.get_resname() in accept_residues
     }
-
     io = PDBIO()
     io.set_structure(protein_structure)
     io.save(output_pdb, ResidueSelect(close_residues))
@@ -105,7 +100,7 @@ class Embed_Mols:
             # 中性化していた場合chargeを付与して戻す
             # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
             #if not self.gl.is_neutral:
-            self.add_charge(output_path_prefix)
+            #self.add_charge(output_path_prefix)
 
     def csv_to_mol2(self, csv, output_path_prefix, ligand_pdb):
         aascore_conf = self.conf['AAScore']
@@ -209,10 +204,27 @@ class Embed_Mols:
                     properties=['generated_id', 'smiles', 'MW', 'LogP', 'donor', 'acceptor', 'energy', '_Name'], idName='ChemTS_idx')
 
             conformers_output_dir = os.path.join(output_dir, 'conformers')
+            mol2_paths = []
             for i, pbmol in enumerate(pybel.readfile('sdf', sdf_name)):
                 mol2_name = f'{conformers_output_dir}_{str(i).zfill(cpc_order_scale)}.mol2'
                 pbmol.write('mol2', mol2_name, overwrite=True)
-                subprocess.run(['obabel', '-imol2', mol2_name,'-opdb', '-O', mol2_name.replace('mol2','pdb')])
+                #pdbは全く使用していないのでCO
+                #subprocess.run(['obabel', '-imol2', mol2_name,'-opdb', '-O', mol2_name.replace('mol2','pdb')])
+                subprocess.run(['obabel', '-imol2', mol2_name,'-omol2', '-O', mol2_name, '-ph', '7.4'])
+                mol2_paths.append(mol2_name)
+            charged_mols = []
+            for mol2 in mol2_paths:
+                mol = Chem.MolFromMol2File(mol2, sanitize=False, removeHs=False)
+                if mol is not None:
+                    charged_mols.append(mol)
+            for index, mol in enumerate(charged_mols):
+                mol.SetProp('_Name', f"{row['ChemTS_idx']}_{str(index).zfill(cpc_order_scale)}")
+            
+            charged_sdf_name = sdf_name
+            writer = Chem.SDWriter(charged_sdf_name)
+            for mol in charged_mols:
+                writer.write(mol)
+            writer.close()
 
     def calc_df_properties(self, df):
         if 'Unnamed: 0' in df.columns:
@@ -275,19 +287,6 @@ class Embed_Mols:
             intra_cluster_distances = rmsd_mtx[cluster_indices][:, cluster_indices].sum(axis=1)
             representative_index = cluster_indices[np.argmin(intra_cluster_distances)]  # 最も中心的な点
             cluster_centers.append(representative_index)
-        
-        # # デンドログラムの描画
-        # plt.figure(figsize=figsize)
-        # dn = sch.dendrogram(linkage_matrix, labels=np.arange(len(rmsd_mtx)))
-        # x_labels = np.array(dn['ivl'], dtype=int)
-        # # クラスタ中心に対応する x 軸のラベルを赤くする
-        # for label in x_labels:
-        #     color = 'red' if label in cluster_centers else 'black'
-        #     plt.gca().get_xticklabels()[np.where(x_labels == label)[0][0]].set_color(color)
-        
-        # plt.axhline(y=linkage_matrix[-n_clusters, 2], color='r', linestyle='--')  # クラスタ数nのカットオフ線
-        # plt.xticks(fontsize=12)  # x軸のラベルのフォントサイズを12に設定（適宜変更）
-        # plt.show()
         
         return cluster_centers, labels
 
@@ -388,10 +387,9 @@ class Embed_Mols:
     def add_charge(self, conformers_path):
         conformers = sorted(glob(os.path.join(conformers_path + '*', 'conformers_*.mol2')))
         for conf in conformers:
-            # for debug
+            # for debug->pdb,mol2は不要だよね。
             # obabel -ipdb ${input}.pdb -opdb -O ${output}.pdb -ph 7.4
             subprocess.run(['obabel', '-imol2', conf,'-omol2', '-O', conf, '-ph', '7.4'])
-
             # rdkitではmol2扱いにくいのでpdbにしておく 
             subprocess.run(['obabel', '-imol2', conf,'-opdb', '-O', conf.replace('mol2','pdb')])
 
@@ -402,10 +400,7 @@ class AA_Score:
         self.output_dir = self.conf['OUTPUT']['directory'] 
         
         self.aascore_output_dirname = os.path.join(self.output_dir, self.conf['AAScore']['working_directory'])
-        #self.aascore_output_dirname = self.conf['AAScore']['OUTPUT']['directory']
         self.aascore_output_filename = 'scores.txt'
-        #self.aascore_output_filename = os.path.join(self.aascore_output_dirname, 'scores.txt')
-        #self.aascore_output_filename = self.conf['AAScore']['OUTPUT']['filename']
         self.generate_dir = os.path.join(self.conf['OUTPUT']['directory'],
                                          self.conf['ChemTS']['working_directory']
                                          )
@@ -524,14 +519,6 @@ class AA_Score:
         poc = os.path.abspath(pocket_pdb_path)
         lig = os.path.abspath(lead_sdf_path)
         log = os.path.abspath(aascore_output_file_path)
-        print("##############################")
-        print("##############################")
-        print("##############################")
-        print(poc, lig, cwd)
-        print(log)
-        print("##############################")
-        print("##############################")
-        print("##############################")
         os.chdir('/AA-Score-Tool')
         os.system("python AA_Score.py --Rec "+poc+" --Lig "+lig+" --Out "+log)
         self.logger.info(f'{lead_sdf_path} done.')
@@ -588,8 +575,8 @@ class AA_Score:
         df_all_concat = pd.concat(df_all, ignore_index=True).sort_values('AAScore')
         df_all_top_concat = pd.concat(df_all_top, ignore_index=True).sort_values('AAScore')
                     
-        all_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_trajectory.sdf')
-        top_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_trajectory_top.sdf')
+        all_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_traj.sdf')
+        top_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_traj_top.sdf')
         PandasTools.WriteSDF(df_all_concat, all_trajectory_sdf_out_path, 
                              molColName='ROMol' ,properties=list(df_all_concat.columns))
         PandasTools.WriteSDF(df_all_top_concat, top_trajectory_sdf_out_path,
