@@ -30,70 +30,54 @@ class AA_Score:
         self.conf = config
         self.output_dir = self.conf['OUTPUT']['directory'] 
         
-        self.aascore_output_dirname = os.path.join(self.output_dir, self.conf['AAScore']['working_directory'])
+        self.aascore_output_dirname = os.path.join(self.output_dir, 
+                                                   self.conf['AAScore']['working_directory'])
         self.aascore_output_filename = 'scores.txt'
         self.generate_dir = os.path.join(self.conf['OUTPUT']['directory'],
                                          self.conf['ChemTS']['working_directory']
                                          )
+        self.sincho_dir = os.path.join(self.conf['OUTPUT']['directory'],
+                                       self.conf['SINCHO']['working_directory']
+                                       )
         self.aascore_outdir = self.aascore_output_dirname
         self.output_files = []
         self.rank_output_dir = []
-        self.max_workers = self.conf['AAScore']['parallel_num']
+        self.max_workers = int(self.conf['GENERAL']['use_num_threads'])
         self.SDF_output_num = self.conf['AAScore']['output_num']           
         self.SDF_name_prefix = self.conf['AAScore']['OUTPUT']['sdf_name_prefix']
         self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.output_dir, self.conf['OUTPUT']['logs_dir'], 'AAScore.log'))
 
     def run(self):
-        self.aascore_outdir = self.aascore_output_dirname
         os.makedirs(self.aascore_outdir, exist_ok = True)
 
-        for trajectory_dir in self.gl.trajectory_dirs:
-            trajectory_name, trajectory_num = self._parse_trajectory_name(trajectory_dir)
+        #生成(及びEmbed)のtrajectory-rankの候補を取得
+        chemts_trial_dirs = self.gl.rank_output_dirs
+        scores = []
+        for ct_dir in chemts_trial_dirs:
+            #ct_dir ex. 'out_6Z0R/03_CompGen/trajectory_006/rank_01'
+            aa_wdir = ct_dir.replace(self.generate_dir, self.aascore_outdir)
+            #aa_wdir ex. 'out_6Z0R/04_DeltaGEst/trajectory_006/rank_01'
+            aa_wdir_par = os.path.dirname(aa_wdir)
+            #sc_wdir_par ex. 'out_6Z0R/02_MakeDec/trajectory_006'
+            sc_wdir_par = aa_wdir_par.replace(self.aascore_outdir, self.sincho_dir)
 
-            # ChemTS生成結果のパスを取得
-            generate_tra_dir = self._get_generate_dir(trajectory_name)
+            prot_name = f'prot_{ct_dir.split("/")[-2].split("_")[-1]}.pdb'
+            lig_name  = f'lig_{ct_dir.split("/")[-2].split("_")[-1]}.pdb'
+            prot_pdb   = os.path.join(aa_wdir_par, f'prot_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
+            lig_pdb    = os.path.join(aa_wdir_par, f'lig_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
+            pocket_pdb = os.path.join(aa_wdir_par, f'pocket_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
 
-            # AAScoreの結果出力先を設定
-            aascore_tra_dir = self._get_aascore_tra_dir(self.aascore_outdir, trajectory_name)
-            os.makedirs(aascore_tra_dir, exist_ok = True)
-
-            # トラジェクトリーごとにタンパク質とリガンドを取得し、ポケットを計算
-            protein_pdb, compound_pdb = self._get_pdb_files(trajectory_dir, trajectory_num)
-            self._copy_files([protein_pdb, compound_pdb], aascore_tra_dir)
-            pocket_pdb_path = os.path.join(aascore_tra_dir, f'pocket_{trajectory_num}.pdb')
-            distance = self.conf['AAScore']['protein_range']
-            self._extract_residues_within_distance(protein_pdb, compound_pdb, pocket_pdb_path, distance=distance)
-
-            rank_num = len(os.listdir(generate_tra_dir))
-            order_scale = int(len(str(int(rank_num)))+1)
-            for r in range(rank_num):
-                rank = str(r).zfill(order_scale)
-                self._process_rank(generate_tra_dir, aascore_tra_dir, rank, pocket_pdb_path)
-
-    def _parse_trajectory_name(self, trajectory_dir):
-        """トラジェクトリ名と番号を抽出"""
-        trajectory_name = trajectory_dir.split(os.sep)[-1]
-        trajectory_num = str(trajectory_name.split('_')[-1])
-        return trajectory_name, trajectory_num
-
-    def _get_generate_dir(self, trajectory_name):
-        """生成ディレクトリを取得"""
-        return os.path.join(self.generate_dir, trajectory_name)
-
-    def _get_aascore_tra_dir(self, aascore_outdir, trajectory_name):
-        """AAScoreトラジェクトリディレクトリを取得"""
-        return os.path.join(aascore_outdir, trajectory_name)
-
-    def _get_pdb_files(self, trajectory_dir, trajectory_num):
-        """PDBファイルを取得"""
-        protein_pdb = os.path.join(trajectory_dir, f'prot_{trajectory_num}.pdb')
-        compound_pdb = os.path.join(trajectory_dir, f'lig_{trajectory_num}.pdb')
-        return protein_pdb, compound_pdb
-
-    def _copy_files(self, files, dest_dir):
-        """複数のファイルをコピー"""
-        for file in files:
-            shutil.copy(file, dest_dir)
+            if not os.path.isfile(prot_pdb):
+                shutil.copy(os.path.join(sc_wdir_par, prot_name), aa_wdir_par)
+            if not os.path.isfile(lig_pdb):
+                shutil.copy(os.path.join(sc_wdir_par, lig_name), aa_wdir_par)
+            if not os.path.isfile(pocket_pdb):
+                distance = self.conf['AAScore']['protein_range']
+                self._extract_residues_within_distance(prot_pdb, lig_pdb, pocket_pdb, distance=distance)
+            #AA実行
+            self._processess(aa_wdir, pocket_pdb, scores)
+        #結果まとめ
+        self._summary(scores)
 
     def _extract_residues_within_distance(self, protein_pdb, compound_pdb, output_pdb, distance=13.0):
         parser = PDBParser(QUIET=True)
@@ -124,47 +108,23 @@ class AA_Score:
         io = PDBIO()
         io.set_structure(protein_structure)
         io.save(output_pdb, ResidueSelect(close_residues))
-        print('save at', output_pdb)
+        #print('save at', output_pdb)
 
-    def _process_rank(self, generate_tra_dir, aascore_tra_dir, rank, pocket_pdb_path):
-        rank_name = f'rank_{str(rank)}'
-        generate_tra_rank_dir = os.path.join(generate_tra_dir, rank_name)
-        aascore_tra_rank_dir = os.path.join(aascore_tra_dir, rank_name)
-        os.makedirs(aascore_tra_rank_dir, exist_ok=True)
-
-        self.rank_output_dir.append(aascore_tra_rank_dir)
-
-        lead_paths = glob(os.path.join(aascore_tra_rank_dir, 'lead_*'))
-        #lead_paths = glob(os.path.join(generate_tra_rank_dir, 'lead_*'))
-        lead_num = len(lead_paths)
-        lead_order_scale = int(len(str(int(lead_num)))+1) 
-        aascore_output_file_paths = []
-
+    def _processess(self, aa_wdir, pocket_pdb, scores):
+        lead_paths = glob(os.path.join(aa_wdir, 'lead_*'))
         task_list = []
-        for lead in range(lead_num):
-            lead_name = f'lead_{str(lead).zfill(lead_order_scale)}'
-            generate_tra_rank_lead_dir = os.path.join(generate_tra_rank_dir, lead_name)
-            aascore_tra_rank_lead_dir = os.path.join(aascore_tra_rank_dir, lead_name)
-            os.makedirs(aascore_tra_rank_lead_dir, exist_ok=True)
-            aascore_output_file_path = os.path.join(aascore_tra_rank_lead_dir, self.aascore_output_filename)
-            aascore_output_file_paths.append(aascore_output_file_path)
 
-            # lead.sdfのパスを取得
-            sdf_paths = glob(os.path.join(aascore_tra_rank_lead_dir, '*.sdf'))
-            if not sdf_paths:
-                self.logger.error(f'No conf sdf in {generate_tra_rank_lead_dir}.')
-                continue
-
-            lead_sdf_path = sdf_paths[0]
-            #shutil.copy(lead_sdf_path, aascore_tra_rank_lead_dir)
-
-            task_list.append((pocket_pdb_path, lead_sdf_path, aascore_output_file_path))
-        self.output_files.append(aascore_output_file_paths)
+        for lead in lead_paths:
+            scores_file_path = os.path.join(lead, self.aascore_output_filename)
+            input_sdf = os.path.join(lead, 'conformers.sdf')
+            if os.path.isfile(input_sdf) and os.stat(input_sdf).st_size>0: #conformer.sdfが存在し、空(Embed失敗)でないもの
+                task_list.append([pocket_pdb, input_sdf, scores_file_path])
+                scores.append(scores_file_path)
 
         # 並列処理の実行
         max_workers = self.max_workers
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._process_lead, *args) for args in task_list]
+            futures = [executor.submit(self._run_AAScore, *args) for args in task_list]
             # すべてのタスクが完了するのを待つ（エラーチェック含む）
             for future in concurrent.futures.as_completed(futures):
                 try:
@@ -172,79 +132,45 @@ class AA_Score:
                 except Exception as e:
                     self.logger.error(f"Error in parallel execution: {e}")
 
-    def _process_lead(self, pocket_pdb_path, lead_sdf_path, aascore_output_file_path):
-        if not os.path.exists(lead_sdf_path):
-            self.logger.error(f'No conf sdf at {lead_sdf_path}.')
-            return
-
-        self._run_AAScore(pocket_pdb_path, lead_sdf_path, aascore_output_file_path)
-
-    def _run_AAScore(self, pocket_pdb_path, lead_sdf_path, aascore_output_file_path):
-        self.logger.info(f'start , {lead_sdf_path}')
+    def _run_AAScore(self, pocket_pdb, input_sdf, scores_file_path):
+        #self.logger.info(f'start , {input_sdf}')
         cwd = os.getcwd()
-        poc = os.path.abspath(pocket_pdb_path)
-        lig = os.path.abspath(lead_sdf_path)
-        log = os.path.abspath(aascore_output_file_path)
-        os.chdir('/AA-Score-Tool')
+        poc = os.path.abspath(pocket_pdb)
+        lig = os.path.abspath(input_sdf)
+        log = os.path.abspath(scores_file_path)
+        os.chdir('/AA_Score_Tool')
         os.system("python AA_Score.py --Rec "+poc+" --Lig "+lig+" --Out "+log)
-        self.logger.info(f'{lead_sdf_path} done.')
+        self.logger.info(f'{input_sdf} done.')
         os.chdir(cwd)
         return log
 
-    def _get_trajectory_rank_number(self, path):
-        split_path = path.split(os.sep)
-        trajectory_name = split_path[[i for i, item in enumerate(split_path) if re.match(r"trajectory_\d+$", item)][0]]
-        trajectory_num = str(trajectory_name.split('_')[-1])
-        rank_name = split_path[[i for i, item in enumerate(split_path) if re.match(r"rank_\d+$", item)][0]]
-        rank_num = str(rank_name.split('_')[-1])
-        return trajectory_num, rank_num
+    def _summary(self, scores):
+        df_all = pd.DataFrame(columns=['ROMol', 'AAScore', 'trajectory_num', 'rank_num', 'lead_num', 'conf_num'])
         
-    def result_output(self):
-        df_all, df_all_top = [], []
-        for n, rank_results in enumerate(self.output_files):
-            mols, aascores = [], []
-            for lead_result in rank_results:
-                df_aascore = pd.read_csv(lead_result, names=['Name', 'score'], sep="\t").sort_values('score')
-                top_conformer_name , top_conformer_score = df_aascore.loc[df_aascore["score"].idxmin(), ['Name','score']]
-                top_conformer_num = top_conformer_name.split('_')[-1]
-                aascores.append(top_conformer_score)
+        for n, each_cpd_log_file in enumerate(scores): #each_cpd_log_file: out_6Z0R/04_DeltaGEst/trajectory_006/rank_01/lead_01/scores.txt
 
-                sdf_path = lead_result.replace(self.aascore_output_filename, 'conformers.sdf')
-                sup = Chem.SDMolSupplier(sdf_path)
-                mols_sdf = [mol for mol in sup if mol is not None]
-                mol = mols_sdf[int(top_conformer_num)]
-                mols.append(mol)
+            df_aascore = pd.read_csv(each_cpd_log_file, names=['Name', 'score'], sep="\t").sort_values('score')
+            #一番いいポーズのNameとスコアを取得
+            top_conformer_name , top_conformer_score = df_aascore.loc[df_aascore["score"].idxmin(), ['Name','score']]
+            top_conformer_num = top_conformer_name.split('_')[-1]
+            input_sdf = each_cpd_log_file.replace(self.aascore_output_filename, 'conformers.sdf')
+            best_pose = Chem.SDMolSupplier(input_sdf)[int(top_conformer_num)]
+            best_pose.SetProp('AAScore', str(top_conformer_score))
+            best_pose.SetProp('RootName', os.path.dirname(each_cpd_log_file))
+            writer = Chem.SDWriter(each_cpd_log_file.replace(self.aascore_output_filename, 'best_pose.sdf'))
+            writer.write(best_pose)
+            writer.close()
 
-            trajectory_num, rank_num = self._get_trajectory_rank_number(lead_result)
-            df = pd.DataFrame({'ROMol':mols, 'AAScore':aascores})
-            df['trajectory_num'], df['rank_num'], df['lead_num'] = trajectory_num, rank_num, range(len(df))
-            # 分子からプロパティを取得してカラムに追加
-            properties = []
-            for mol in mols:
-                if mol is not None:
-                    props = mol.GetPropsAsDict() #プロパティを辞書型で取得
-                    properties.append(props)
-            df_props = pd.DataFrame(properties)
-            df = pd.concat([df, df_props], axis=1).sort_values('AAScore')
-            df_top = df[:self.SDF_output_num]
+            #df_allに追加
+            sp_dir = each_cpd_log_file.split("/")
+            df_all.loc[str(n)] = [best_pose, str(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name)]
+            df_all_sorted = df_all.sort_values('AAScore')
+            df_top = df_all_sorted[:self.SDF_output_num]
 
-            df_all.append(df)
-            df_all_top.append(df_top)
+            #sdf出力
+            all_sdf_out_file = os.path.join(self.aascore_outdir, 'all.sdf')
+            PandasTools.WriteSDF(df_all_sorted, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted.columns))
+            top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'.sdf')
+            PandasTools.WriteSDF(df_top, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top.columns))
 
-            sdf_out_dir = self.rank_output_dir[n]
-            all_sdf_out_path = os.path.join(sdf_out_dir, self.SDF_name_prefix + '_all.sdf')
-            top_sdf_out_path = os.path.join(sdf_out_dir, self.SDF_name_prefix + '_top.sdf')
-            
-            PandasTools.WriteSDF(df, all_sdf_out_path, molColName='ROMol' ,properties=list(df.columns))
-            PandasTools.WriteSDF(df_top, top_sdf_out_path, molColName='ROMol' ,properties=list(df_top.columns))
-
-        df_all_concat = pd.concat(df_all, ignore_index=True).sort_values('AAScore')
-        df_all_top_concat = pd.concat(df_all_top, ignore_index=True).sort_values('AAScore')
-                    
-        all_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_traj.sdf')
-        top_trajectory_sdf_out_path= os.path.join(self.aascore_outdir, self.SDF_name_prefix + '_all_traj_top.sdf')
-        PandasTools.WriteSDF(df_all_concat, all_trajectory_sdf_out_path, 
-                             molColName='ROMol' ,properties=list(df_all_concat.columns))
-        PandasTools.WriteSDF(df_all_top_concat, top_trajectory_sdf_out_path,
-                             molColName='ROMol' ,properties=list(df_all_top_concat.columns))
 

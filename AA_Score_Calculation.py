@@ -204,6 +204,8 @@ class Embed_Mols:
                     properties=['generated_id', 'smiles', 'MW', 'LogP', 'donor', 'acceptor', 'energy', '_Name'], idName='ChemTS_idx')
 
             conformers_output_dir = os.path.join(output_dir, 'conformers')
+            #ほんとはProtonationつけたいけど、Kekulizeエラーが多くなるから、現状コメントアウト
+            """
             mol2_paths = []
             for i, pbmol in enumerate(pybel.readfile('sdf', sdf_name)):
                 mol2_name = f'{conformers_output_dir}_{str(i).zfill(cpc_order_scale)}.mol2'
@@ -225,6 +227,7 @@ class Embed_Mols:
             for mol in charged_mols:
                 writer.write(mol)
             writer.close()
+            """
 
     def calc_df_properties(self, df):
         if 'Unnamed: 0' in df.columns:

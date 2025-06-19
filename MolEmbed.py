@@ -23,12 +23,6 @@ import concurrent.futures
 
 from IPython.core.debugger import Pdb
 
-def _parse_trajectory_name(trajectory_dir):
-    """トラジェクトリ名と番号を抽出"""
-    trajectory_name = trajectory_dir.split(os.sep)[-1]
-    trajectory_num = str(trajectory_name.split('_')[-1])
-    return trajectory_name, trajectory_num
-
 class Embed_Mols:
     def __init__(self, generate_lead, config):
         self.gl = generate_lead
@@ -53,14 +47,14 @@ class Embed_Mols:
             output_path_prefix = os.path.join(parent_dir, 'lead')
                  
             # yaml記述の条件下で、results.csvからlead.xlsxを作成,df生成
-            df_choice = self._compounds_select(csv=csv_file, output_path_prefic=output_path_prefix)
+            df_choice = self._compounds_select(csv=csv_file, output_path_prefix=output_path_prefix)
 
             ncpd_scale = int(len(str(int(len(df_choice))))+1)
           
             # 各compoundについて3次元構造生成
             # まずhitのセットアップ # 反応点チェック
             core_pdb = os.path.join(self.sinchodir, tdir, 'lig_'+trajectory_num+'.pdb')
-            with open(os.path.join(self.sinchodir, tdir, 'sincho_result.yaml','r'))as f:
+            with open(os.path.join(self.sinchodir, tdir, 'sincho_result.yaml'),'r')as f:
                 sincho_res = yaml.safe_load(f)
             anchor_atomname = str(sincho_res['SINCHO_result'][rdir]['atom_num']).split('_')[-1]
 
@@ -91,9 +85,7 @@ class Embed_Mols:
             return
         # 物性値をdfに追記
         df = self._calc_df_properties(df)
-        print(df.shape())
         df_indep = df.drop_duplicates(subset='canonical_smiles', keep='first')
-        print(df_indep.shape())
         if reward_cutoff:
             df_rew = df_indep[df_indep['reward'] >= reward_cutoff]
         else:
@@ -124,7 +116,7 @@ class Embed_Mols:
         df['acceptor'] = [rdMolDescriptors.CalcNumLipinskiHBA(m) for m in df['mols']]
         return df
     
-    def _core_def(pdb_path, label):
+    def _core_def(self, pdb_path, label):
         mol = Chem.MolFromPDBFile(pdb_path, removeHs=False, sanitize=False)
         pdbmol = mol
         for atom in mol.GetAtoms():
@@ -171,7 +163,7 @@ class Embed_Mols:
         smiles_b = row['smiles']
         #object立ち上げ
         query = Chem.MolFromSmarts(smarts)
-        target = Chem.MolFromSmiles(smiles_b)
+        target = Chem.MolFromSmiles(smiles_b, sanitize=True)
         target = Chem.AddHs(target)
         AllChem.Compute2DCoords(target)
         #部分構造マッチ
@@ -192,10 +184,10 @@ class Embed_Mols:
         else:
             pairs = match_pairs[0]
         #マッチ結果の検証(正しいマッチングかどうかチェック)
-        checker = self._is_only_modified_at_wildcard(query, target, pairs)
-        if checker== False:
-            self.logger.warning(f"Invalid match for {smiles_b} with core {smarts}. Skipping embedding.")
-            return
+        #checker = self._is_only_modified_at_wildcard(query, target, pairs)
+        #if checker== False:
+        #    self.logger.warning(f"Invalid match for {smiles_b} with core {smarts}. Skipping embedding.")
+        #    return
         
         ref = core_wc_mol.GetConformer()
         #拘束する原子のindexとその座標を格納
@@ -214,7 +206,7 @@ class Embed_Mols:
         self._embed_confs(target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path)
         return
     
-    def _is_only_modified_at_wildcard(query, target, match):
+    def _is_only_modified_at_wildcard(self, query, target, match):
         # query中のワイルドカードのindex（AtomicNum=0）
         wildcard_qidx = [a.GetIdx() for a in query.GetAtoms() if a.GetAtomicNum() == 0]
         if not wildcard_qidx:
@@ -223,10 +215,13 @@ class Embed_Mols:
         wildcard_tid = match[wildcard_qidx]
         # 除去対象のインデックス = match中の他のインデックス
         remove_ids = [tid for i, tid in enumerate(match) if i != wildcard_qidx]
+        print(remove_ids)
         # target Mol を EditableMol に変換
         rw = Chem.EditableMol(Chem.Mol(target))
-        for idx in sorted(remove_ids, reverse=True):  # 高いindexから削除
-            rw.RemoveAtom(idx)
+        #for iii in sorted(remove_ids, reverse=True):  # 高いindexから削除
+        #    rw.RemoveAtom(iii)
+        for _, tgt_idx in sorted(remove_ids, key=lambda x: x[1], reverse=True):
+            rw.RemoveAtom(tgt_idx)
         try:
             remaining = rw.GetMol()
             fragments = Chem.GetMolFrags(remaining, asMols=True)
@@ -234,15 +229,16 @@ class Embed_Mols:
         except:
             return False
 
-    def _embed_confs(target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
+    def _embed_confs(self, target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
         generated, attempts = 0,0
         while generated < n_conf and attempts < max_attempts:
             attempts += 1
-            print(attempts)
+            #print(attempts)
             tmpmol = Chem.Mol(target)
             res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1)
             if res != 0:
-                raise RuntimeError("EmbedMolecule was failed")
+                print("EmbedMolecule was failed")
+                continue
             #ここでminimize
             fixed_atoms = coord_map.keys()
             uff = AllChem.UFFGetMoleculeForceField(tmpmol, confId=0)
@@ -261,10 +257,16 @@ class Embed_Mols:
                 conf.SetId(generated)
                 target.AddConformer(conf, assignId=True)
                 generated += 1
-                print(f'pass {generated}')
+                print(f'generated {generated}')
         writer = Chem.SDWriter(os.path.join(confgen_output_path, 'conformers.sdf'))
-        for conf in target.GetConformers():
-            writer.write(target, confId=conf.GetId())
+        for cid,conf in enumerate(target.GetConformers()):
+            conf_id = conf.GetId()
+            conf_mol = Chem.Mol(target)
+            conf_mol.RemoveAllConformers()
+            conf_mol.AddConformer(conf, assignId=True)
+            conf_mol.SetProp("_Name", "confid_"+str(cid))
+            #writer.write(target, confId=conf.GetId())
+            writer.write(conf_mol)
         writer.close()
 
         return
