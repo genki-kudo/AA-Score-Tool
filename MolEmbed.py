@@ -22,6 +22,7 @@ from Bio.PDB.NeighborSearch import NeighborSearch
 import concurrent.futures
 
 from IPython.core.debugger import Pdb
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class Embed_Mols:
     def __init__(self, generate_lead, config):
@@ -34,44 +35,59 @@ class Embed_Mols:
         self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.outdir, self.conf['OUTPUT']['logs_dir'], 'Embed.log'))
 
     def run(self):
+        num_threads = int(self.conf['GENERAL']['use_num_threads'])
+        """
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.gl.rank_output_dirs]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logger.error(f"Thread failed: {e}")
+        """
         for rank_dir in self.gl.rank_output_dirs:
-            # ディレクトリ・ファイルの定義
-            self.logger.info(rank_dir)
-            trajectory_name = rank_dir.split("/")[-2].split("_")[0]
-            trajectory_num = rank_dir.split("/")[-2].split("_")[1]
-            tdir = rank_dir.split("/")[-2]
-            rdir = rank_dir.split("/")[-1]
-            csv_file = os.path.join(rank_dir, 'results.csv')
-            parent_dir = os.path.join(self.workdir, tdir, rdir)
-            os.makedirs(parent_dir, exist_ok=True)
-            output_path_prefix = os.path.join(parent_dir, 'lead')
-                 
-            # yaml記述の条件下で、results.csvからlead.xlsxを作成,df生成
-            df_choice = self._compounds_select(csv=csv_file, output_path_prefix=output_path_prefix)
+            self._run_a_rank(rank_dir)
+        
 
-            ncpd_scale = int(len(str(int(len(df_choice))))+1)
-          
-            # 各compoundについて3次元構造生成
-            # まずhitのセットアップ # 反応点チェック
-            core_pdb = os.path.join(self.sinchodir, tdir, 'lig_'+trajectory_num+'.pdb')
-            with open(os.path.join(self.sinchodir, tdir, 'sincho_result.yaml'),'r')as f:
-                sincho_res = yaml.safe_load(f)
-            anchor_atomname = str(sincho_res['SINCHO_result'][rdir]['atom_num']).split('_')[-1]
+    
+    def _run_a_rank(self, rank_dir):
+        # ディレクトリ・ファイルの定義
+        self.logger.info(rank_dir)
+        trajectory_name = rank_dir.split("/")[-2].split("_")[0]
+        trajectory_num = rank_dir.split("/")[-2].split("_")[1]
+        tdir = rank_dir.split("/")[-2]
+        rdir = rank_dir.split("/")[-1]
+        csv_file = os.path.join(rank_dir, 'results.csv')
+        parent_dir = os.path.join(self.workdir, tdir, rdir)
+        os.makedirs(parent_dir, exist_ok=True)
+        output_path_prefix = os.path.join(parent_dir, 'lead')
+                
+        # yaml記述の条件下で、results.csvからlead.xlsxを作成,df生成
+        df_choice = self._compounds_select(csv=csv_file, output_path_prefix=output_path_prefix)
 
-            # 構造マッチのためのコア定義＆ワイルドカード化&SMARTS化
-            core_mol, core_wc_mol, smarts = self._core_def(core_pdb, anchor_atomname)
-            self.logger.info(f"Core definition: {smarts}")
+        ncpd_scale = int(len(str(int(len(df_choice))))+1)
+        
+        # 各compoundについて3次元構造生成
+        # まずhitのセットアップ # 反応点チェック
+        core_pdb = os.path.join(self.sinchodir, tdir, 'lig_'+trajectory_num+'.pdb')
+        with open(os.path.join(self.sinchodir, tdir, 'sincho_result.yaml'),'r')as f:
+            sincho_res = yaml.safe_load(f)
+        anchor_atomname = str(sincho_res['SINCHO_result'][rdir]['atom_num']).split('_')[-1]
 
-            # 各構造でコンフォーマー生成のループ
-            for idx, row in df_choice.iterrows():
-                confgen_output_path = output_path_prefix+'_'+str(idx).zfill(ncpd_scale)
-                self._conf_gen(idx=idx, row=row, output_path=confgen_output_path,
-                               core_mol=core_mol, core_wc_mol=core_wc_mol, smarts=smarts, confgen_output_path=confgen_output_path)
+        # 構造マッチのためのコア定義＆ワイルドカード化&SMARTS化
+        core_mol, core_wc_mol, smarts = self._core_def(core_pdb, anchor_atomname)
+        #self.logger.info(f"Core definition: {smarts}")
 
-            # 中性化していた場合chargeを付与して戻す
-            # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
-            #if not self.gl.is_neutral:
-            #self.add_charge(output_path_prefix)
+        # 各構造でコンフォーマー生成のループ
+        for idx, row in df_choice.iterrows():
+            confgen_output_path = output_path_prefix+'_'+str(idx).zfill(ncpd_scale)
+            self._conf_gen(idx=idx, row=row, output_path=confgen_output_path,
+                            core_mol=core_mol, core_wc_mol=core_wc_mol, smarts=smarts, confgen_output_path=confgen_output_path)
+
+        # 中性化していた場合chargeを付与して戻す
+        # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
+        #if not self.gl.is_neutral:
+        #self.add_charge(output_path_prefix)
 
     def _compounds_select(self, csv, output_path_prefix):
         ## input  : results.csv (obtained from ChemTS)
@@ -215,7 +231,7 @@ class Embed_Mols:
         wildcard_tid = match[wildcard_qidx]
         # 除去対象のインデックス = match中の他のインデックス
         remove_ids = [tid for i, tid in enumerate(match) if i != wildcard_qidx]
-        print(remove_ids)
+        #print(remove_ids)
         # target Mol を EditableMol に変換
         rw = Chem.EditableMol(Chem.Mol(target))
         #for iii in sorted(remove_ids, reverse=True):  # 高いindexから削除
@@ -229,22 +245,23 @@ class Embed_Mols:
         except:
             return False
 
+
     def _embed_confs(self, target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
         generated, attempts = 0,0
         while generated < n_conf and attempts < max_attempts:
             attempts += 1
             #print(attempts)
             tmpmol = Chem.Mol(target)
-            res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1)
+            res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1, maxAttempts=3)
             if res != 0:
-                print("EmbedMolecule was failed")
+                #print("EmbedMolecule was failed")
                 continue
             #ここでminimize
             fixed_atoms = coord_map.keys()
             uff = AllChem.UFFGetMoleculeForceField(tmpmol, confId=0)
             for a_idx in fixed_atoms:
                 uff.AddFixedPoint(a_idx)
-            uff.Minimize()
+            uff.Minimize(maxIts=500)
 
             is_unique = True
             for conf in target.GetConformers():
@@ -257,7 +274,7 @@ class Embed_Mols:
                 conf.SetId(generated)
                 target.AddConformer(conf, assignId=True)
                 generated += 1
-                print(f'generated {generated}')
+                #print(f'generated {generated}')
         writer = Chem.SDWriter(os.path.join(confgen_output_path, 'conformers.sdf'))
         for cid,conf in enumerate(target.GetConformers()):
             conf_id = conf.GetId()
