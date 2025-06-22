@@ -36,7 +36,6 @@ class Embed_Mols:
 
     def run(self):
         num_threads = int(self.conf['GENERAL']['use_num_threads'])
-        """
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.gl.rank_output_dirs]
             for future in as_completed(futures):
@@ -47,6 +46,7 @@ class Embed_Mols:
         """
         for rank_dir in self.gl.rank_output_dirs:
             self._run_a_rank(rank_dir)
+        """
         
 
     
@@ -248,11 +248,12 @@ class Embed_Mols:
 
     def _embed_confs(self, target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
         generated, attempts = 0,0
+        heavy_atoms = [atom.GetIdx() for atom in target.GetAtoms() if atom.GetAtomicNum()>1]
         while generated < n_conf and attempts < max_attempts:
             attempts += 1
             #print(attempts)
             tmpmol = Chem.Mol(target)
-            res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1, maxAttempts=3)
+            res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1, maxAttempts=1, useExpTorsionAnglePrefs=True, useBasicKnowledge=True) 
             if res != 0:
                 #print("EmbedMolecule was failed")
                 continue
@@ -261,20 +262,24 @@ class Embed_Mols:
             uff = AllChem.UFFGetMoleculeForceField(tmpmol, confId=0)
             for a_idx in fixed_atoms:
                 uff.AddFixedPoint(a_idx)
-            uff.Minimize(maxIts=500)
+            uff.Initialize()
+            uff.Minimize()
+ 
+            new_conf = tmpmol.GetConformer()
+            new_conf.SetId(generated)
+            target.AddConformer(new_conf, assignId=True)
+            new_conf_id = target.GetNumConformers() -1
 
             is_unique = True
             for conf in target.GetConformers():
-                rms = rdMolAlign.CalcRMS(tmpmol, target, 0, conf.GetId())
-                if rms<rms_thresh:
+                rms = self._rms_no_align(target, conf.GetId(), new_conf_id, atom_indices=heavy_atoms)
+                if rms < rms_thresh and rms != 0:
                     is_unique = False
+                    target.RemoveConformer(new_conf_id)
                     break
             if is_unique:
-                conf = tmpmol.GetConformer()
-                conf.SetId(generated)
-                target.AddConformer(conf, assignId=True)
-                generated += 1
-                #print(f'generated {generated}')
+                generated+=1
+
         writer = Chem.SDWriter(os.path.join(confgen_output_path, 'conformers.sdf'))
         for cid,conf in enumerate(target.GetConformers()):
             conf_id = conf.GetId()
@@ -287,6 +292,23 @@ class Embed_Mols:
         writer.close()
 
         return
+
+    def _rms_no_align(self, mol, confId1, confId2, atom_indices=None):
+        conf1 = mol.GetConformer(confId1)
+        conf2 = mol.GetConformer(confId2)
+        if atom_indices is None:
+            atom_indices = range(mol.GetNumAtoms())
+        sq_diffs = []
+        for i in atom_indices:
+            p1 = conf1.GetAtomPosition(i)
+            p2 = conf2.GetAtomPosition(i)
+            diff = p1 - p2
+            sq_diffs.append(diff.LengthSq())
+        return (sum(sq_diffs) / len(sq_diffs) **0.5)
+
+
+
+
 
 
     """legacy, but useful for protonated molecules
