@@ -163,14 +163,14 @@ class AA_Score:
 
             #df_allに追加
             sp_dir = each_cpd_log_file.split("/")
-            df_all.loc[str(n)] = [best_pose, str(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name)]
-            df_all_sorted = df_all.sort_values('AAScore')
-            df_top = df_all_sorted[:self.SDF_output_num]
+            df_all.loc[str(n)] = [best_pose, float(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name)]
+        df_all_sorted = df_all.sort_values('AAScore')
+        df_top = df_all_sorted[:self.SDF_output_num]
 
-            #sdf出力
-            all_sdf_out_file = os.path.join(self.aascore_outdir, 'all.sdf')
-            PandasTools.WriteSDF(df_all_sorted, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted.columns))
-            top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'.sdf')
-            PandasTools.WriteSDF(df_top, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top.columns))
+        #sdf出力
+        all_sdf_out_file = os.path.join(self.aascore_outdir, 'all.sdf')
+        PandasTools.WriteSDF(df_all_sorted, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted.columns))
+        top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'.sdf')
+        PandasTools.WriteSDF(df_top, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top.columns))
 
 
