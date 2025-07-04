@@ -145,7 +145,7 @@ class AA_Score:
         return log
 
     def _summary(self, scores):
-        df_all = pd.DataFrame(columns=['ROMol', 'AAScore', 'trajectory_num', 'rank_num', 'lead_num', 'conf_num'])
+        df_all = pd.DataFrame(columns=['ROMol', 'AAScore', 'trajectory_num', 'rank_num', 'lead_num', 'conf_num', 'num_heavyatoms', 'AAScore_LE'])
         
         for n, each_cpd_log_file in enumerate(scores): #each_cpd_log_file: out_6Z0R/04_DeltaGEst/trajectory_006/rank_01/lead_01/scores.txt
 
@@ -163,14 +163,25 @@ class AA_Score:
 
             #df_allに追加
             sp_dir = each_cpd_log_file.split("/")
-            df_all.loc[str(n)] = [best_pose, float(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name)]
+            df_all.loc[str(n)] = [best_pose, float(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name), int(best_pose.GetNumHeavyAtoms()), float(top_conformer_score)/int(best_pose.GetNumHeavyAtoms())]
+ 
+        #output
         df_all_sorted = df_all.sort_values('AAScore')
+        df_all_sorted.to_csv(os.path.join(self.aascore_outdir,"all.csv"), index=True)
         df_top = df_all_sorted[:self.SDF_output_num]
-
-        #sdf出力
+        df_top.to_csv(os.path.join(self.aascore_outdir,"top_5000.csv"), index=True)
         all_sdf_out_file = os.path.join(self.aascore_outdir, 'all.sdf')
         PandasTools.WriteSDF(df_all_sorted, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted.columns))
         top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'.sdf')
         PandasTools.WriteSDF(df_top, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top.columns))
 
+        #output
+        df_all_sorted_le = df_all.sort_values('AAScore_LE')
+        df_all_sorted_le.to_csv(os.path.join(self.aascore_outdir,"all_le.csv"), index=True)
+        df_top_le = df_all_sorted_le[:self.SDF_output_num]
+        df_top_le.to_csv(os.path.join(self.aascore_outdir,"top_5000_le.csv"), index=True)
+        all_sdf_out_file = os.path.join(self.aascore_outdir, 'all_le.sdf')
+        PandasTools.WriteSDF(df_all_sorted_le, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted_le.columns))
+        top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'_le.sdf')
+        PandasTools.WriteSDF(df_top_le, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top_le.columns))
 
