@@ -35,6 +35,7 @@ class Embed_Mols:
         self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.outdir, self.conf['OUTPUT']['logs_dir'], 'Embed.log'))
 
     def run(self):
+        #_run_a_rankを実行するoperator（各ChemTS結果毎に並列化）
         num_threads = int(self.conf['GENERAL']['use_num_threads'])
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.gl.rank_output_dirs]
@@ -43,12 +44,6 @@ class Embed_Mols:
                     future.result()
                 except Exception as e:
                     self.logger.error(f"Thread failed: {e}")
-        """
-        for rank_dir in self.gl.rank_output_dirs:
-            self._run_a_rank(rank_dir)
-        """
-        
-
     
     def _run_a_rank(self, rank_dir):
         # ディレクトリ・ファイルの定義
@@ -63,9 +58,16 @@ class Embed_Mols:
         output_path_prefix = os.path.join(parent_dir, 'lead')
                 
         # yaml記述の条件下で、results.csvからlead.xlsxを作成,df生成
+        # Embedする化合物を選択している。method: randなら生成群からランダムに選択されdf_choiceに渡される
         df_choice = self._compounds_select(csv=csv_file, output_path_prefix=output_path_prefix)
 
-        ncpd_scale = int(len(str(int(len(df_choice))))+1)
+        # df_choiceの化合物数からインデックス付けのスケールを決定
+        # もしdf_choiceがNoneまたは空ならば、_run_a_rankを終了
+        if df_choice is None or len(df_choice) == 0:
+            self.logger.warning(f"No compounds selected for embedding in {rank_dir}. Skipping.")
+            return
+        else:
+            ncpd_scale = int(len(str(int(len(df_choice))))+1)
         
         # 各compoundについて3次元構造生成
         # まずhitのセットアップ # 反応点チェック
@@ -92,6 +94,9 @@ class Embed_Mols:
     def _compounds_select(self, csv, output_path_prefix):
         ## input  : results.csv (obtained from ChemTS)
         ## output : choice_to_docking.csv, lead.xlsx (with 2D images)
+        # mols: モルオブジェクト
+        # canonical_smiles: 正規化SMILES
+        # mhs: 水素を追加したMolオブジェクト
         choice_method = self.conf['AAScore']['method']
         if choice_method == 'rand':
             num_of_cpd = self.conf['AAScore']['num_of_cpd']
@@ -116,11 +121,11 @@ class Embed_Mols:
         if 'mols' in df_choice.columns and df_choice['mols'].notna().any():
             PandasTools.SaveXlsxFromFrame(df_choice, output_path_prefix+'.xlsx', molCol='mols', size=(150,150))
         df_choice['mhs'] = [ Chem.AddHs(m) for m in df_choice['mols'] ]
-        return df_choice
-        
+        return df_choice  
     def _calc_df_properties(self, df):
         ## input  : dataframe
         ## output : dataframe with properties
+        # propertiesにはmolオブジェクトも含まれた状態
         if 'Unnamed: 0' in df.columns:
             df = df.drop('Unnamed: 0', axis=1)
 
@@ -135,29 +140,33 @@ class Embed_Mols:
     def _core_def(self, pdb_path, label):
         mol = Chem.MolFromPDBFile(pdb_path, removeHs=False, sanitize=False)
         pdbmol = mol
+        #coreのmolオブジェクトにpdb内で使用されている原子ラベルをPropertiesとして追加
         for atom in mol.GetAtoms():
             atom.SetProp("pdb_label", atom.GetPDBResidueInfo().GetName())
+        # 後のSMARTS定義のために、Sanitize(kekulizeはエラーになり易いため除外)
         Chem.SanitizeMol(mol, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_KEKULIZE)
-        # ワイルドカードを追加するIndex取得
+        # ワイルドカードを追加するAnchor AtomのIndex取得
         idx = None
         for atom in mol.GetAtoms():
             info = atom.GetPDBResidueInfo()
             if info and info.GetName().strip() == label:
                 idx = atom.GetIdx()
                 break
+        # 書き込み可能なMolオブジェクトに変換
         rw = Chem.RWMol(mol)
         target_atom = rw.GetAtomWithIdx(idx)
-        # ターゲット原子に結合している水素を1つ削除
+        # ターゲット原子に結合している水素をすべて削除
         for nbr in target_atom.GetNeighbors():
             if nbr.GetAtomicNum() == 1:
                 rw.RemoveBond(idx, nbr.GetIdx())
                 rw.RemoveAtom(nbr.GetIdx())
-                break
+                #break
         # ワイルドカード（*）を追加
         dummy_idx = rw.AddAtom(Chem.Atom(0))  # AtomicNum=0 = *
         rw.AddBond(idx, dummy_idx, Chem.BondType.SINGLE)
         # 水素を削除して出力用に整形
         mol_final = rw.GetMol()
+        mol_final = Chem.RemoveHs(mol_final)
         #xyzの再帰
         for atom in mol_final.GetAtoms():
             for a in pdbmol.GetAtoms():
@@ -167,21 +176,42 @@ class Embed_Mols:
                         xyz = pdbmol.GetConformer().GetAtomPosition(ind)
                         atom.SetProp("original_pos", f'{xyz.x},{xyz.y},{xyz.z}')
                         break
-        mol_final = Chem.RemoveHs(mol_final)
+        #smartsに変換
         smarts = Chem.MolToSmarts(mol_final)
         smarts = smarts.replace("#0","*")
+        smarts = smarts.replace("-[*]", "[*]")  # ← 結合タイプを「柔らかく」する
         return pdbmol, mol_final, smarts
  
     def _conf_gen(self, idx, row, output_path, core_mol, core_wc_mol, smarts, confgen_output_path):
         # input  : row and idx in dataframe
         # output : conformations
         os.makedirs(output_path, exist_ok=True)
+        self.logger.info(confgen_output_path)
         smiles_b = row['smiles']
         #object立ち上げ
         query = Chem.MolFromSmarts(smarts)
         target = Chem.MolFromSmiles(smiles_b, sanitize=True)
         target = Chem.AddHs(target)
         AllChem.Compute2DCoords(target)
+
+        # query(SMARTSからの立ち上げ、3Dなし)とcore_wc_mol(ワイルドカード編集したMolオブジェクト、3Dあり)の重ね合わせ
+        cores_match = core_wc_mol.GetSubstructMatch(query)
+        # {query index: core_wc index}の辞書
+        query_core_dict = {}
+        for smartsidx, coreidx in enumerate(cores_match):
+            query_core_dict[smartsidx] = coreidx
+
+        for query_atom in query.GetAtoms():
+            self.logger.info(f"Query Atom: {query_atom.GetIdx()} - {query_atom.GetSymbol()} - {query_atom.GetAtomicNum()}")
+        for core_wc_atom in core_wc_mol.GetAtoms():
+            self.logger.info(f"Core WC Atom: {core_wc_atom.GetIdx()} - {core_wc_atom.GetSymbol()} - {core_wc_atom.GetAtomicNum()}")
+        try:
+            cores_match = core_wc_mol.GetSubstructMatch(query)
+            self.logger.info(f"Core match found: {cores_match}")
+        except Exception as e:
+            self.logger.error(f"Error matching core with query: {e}")
+            return
+
         #部分構造マッチ
         matches = target.GetSubstructMatches(query)
         if not matches:
@@ -191,6 +221,7 @@ class Embed_Mols:
         for match in matches:
             pair = list(enumerate(match))
             match_pairs.append(pair)
+        self.logger.info(match_pairs)
         #マッチ結果の検証(２箇所ある時用の処理)
         if len(match_pairs) > 1:
             #基本ChemTSのつづりはSMILES先頭が母核ー＞Molオブジェクト生成時に小さいindexが付与される
@@ -199,17 +230,29 @@ class Embed_Mols:
             pairs = match_pairs[min_index]
         else:
             pairs = match_pairs[0]
+        core_target_pairs = []
+        for pair in pairs:
+            core_target_pairs.append((query_core_dict[pair[0]], pair[1]))
+        self.logger.info(f"Core-Target Pairs: {core_target_pairs}")
+
+        
         #マッチ結果の検証(正しいマッチングかどうかチェック)
-        #checker = self._is_only_modified_at_wildcard(query, target, pairs)
-        #if checker== False:
-        #    self.logger.warning(f"Invalid match for {smiles_b} with core {smarts}. Skipping embedding.")
-        #    return
+        checker = self._is_only_modified_at_wildcard(query, target, core_target_pairs)
+        if checker== False:
+            self.logger.warning(f"Invalid match for {smiles_b} with core {smarts}. Skipping embedding.")
+            return
         
         ref = core_wc_mol.GetConformer()
+        #ref = core_mol.GetConformer()
         #拘束する原子のindexとその座標を格納
+
+        #coord_map = { target_idx: ref.GetAtomPosition(ref_idx) 
+        #             for ref_idx, target_idx in pairs 
+        #             if core_wc_mol.GetAtomWithIdx(ref_idx).GetAtomicNum() != 0 }
         coord_map = { target_idx: ref.GetAtomPosition(ref_idx) 
-                     for ref_idx, target_idx in pairs 
+                     for ref_idx, target_idx in core_target_pairs 
                      if core_wc_mol.GetAtomWithIdx(ref_idx).GetAtomicNum() != 0 }
+        self.logger.info(coord_map)
         #構造を立ち上げていく
         #立ち上げオプション
         n_conf = int(self.conf['AAScore']['conf_per_cpd']) #最終的に欲しい構造数
@@ -240,22 +283,46 @@ class Embed_Mols:
             rw.RemoveAtom(tgt_idx)
         try:
             remaining = rw.GetMol()
+            #remaining = Chem.RemoveHs(remaining)  # 水素を削除(でないとCoreの水素がFragmentとしてカウントされる)->と思ったけど無駄。
             fragments = Chem.GetMolFrags(remaining, asMols=True)
-            return len(fragments) <= 1
-        except:
+            a_atom_count = 0
+            for fragm in fragments:
+                # fragmに含まれる原子種がすべて水素であれば削除する
+                if all(atom.GetAtomicNum() == 1 for atom in fragm.GetAtoms()):
+                    a_atom_count += 1
+            self.logger.warning("num of fragments: "+str(len(fragments)-a_atom_count))
+            if len(fragments)-a_atom_count <=1:
+                return True
+            else:
+                self.logger.warning("Multiple fragments detected after removing non-wildcard atoms.")
+                return False
+        except Exception as e:
+            self.logger.warning(e)
+            #self.logger.warning("Error warning->num of fragments : "+str(fragments))
             return False
 
 
     def _embed_confs(self, target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
         generated, attempts = 0,0
         heavy_atoms = [atom.GetIdx() for atom in target.GetAtoms() if atom.GetAtomicNum()>1]
+        self.logger.info(f"target index max = {max([atom.GetIdx() for atom in target.GetAtoms()])}")
+        self.logger.info(f"coord_map keys = {list(coord_map.keys())}")
+        for key, value in coord_map.items():
+            self.logger.info(f"Fixed atom position: {value.x}, {value.y}, {value.z}")
+        for atom in target.GetAtoms():
+            self.logger.info(f"Atom {atom.GetIdx()} ({atom.GetSymbol()}): {atom.GetProp('_Name') if atom.HasProp('_Name') else 'No Name'}")
+        
         while generated < n_conf and attempts < max_attempts:
             attempts += 1
             #print(attempts)
             tmpmol = Chem.Mol(target)
+            ####################### refine 2025/07/29 for molecule with chirality ###########
             res = AllChem.EmbedMolecule(tmpmol, coordMap=coord_map, useRandomCoords=True, randomSeed=-1, maxAttempts=1, useExpTorsionAnglePrefs=True, useBasicKnowledge=True) 
+            #res = AllChem.EmbedMolecule(tmpmol,  useRandomCoords=True, randomSeed=-1, maxAttempts=1, useExpTorsionAnglePrefs=True, useBasicKnowledge=True) 
+            
+            ####################### refine 2025/07/29 for molecule with chirality ###########
             if res != 0:
-                #print("EmbedMolecule was failed")
+                self.logger.warning(f"EmbedMolecule was failed: {attempts}")
                 continue
             #ここでminimize
             fixed_atoms = coord_map.keys()
@@ -273,6 +340,8 @@ class Embed_Mols:
             is_unique = True
             for conf in target.GetConformers():
                 rms = self._rms_no_align(target, conf.GetId(), new_conf_id, atom_indices=heavy_atoms)
+                self.logger.info(f"✅ RMS between conf {conf.GetId()} and {new_conf_id} = {rms}")
+
                 if rms < rms_thresh and rms != 0:
                     is_unique = False
                     target.RemoveConformer(new_conf_id)
