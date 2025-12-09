@@ -96,7 +96,7 @@ class AA_Score:
         convert_residues = {"HIE":"HIS", "HID":"HIS", "HIP":"HIS", "CYX":"CYS", "CYM":"CYS",
                             "ASH":"ASP", "GLH":"GLU"}
 
-        for residue in close_residues:
+        for residue in list(close_residues):
             if residue.get_resname() in convert_residues:
                 residue.resname = convert_residues[residue.get_resname()]
             if residue.get_resname() not in accept_residues:
