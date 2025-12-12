@@ -1,0 +1,37 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.9",
+  "pybind11>=2.11",
+  "numpy",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "fast_elec"
+version = "0.1.0"
+description = "Fast electrostatics C++ extension via pybind11"
+requires-python = ">=3.8"
+authors = [
+  { name = "Your Name" }
+]
+dependencies = [
+  "numpy",
+]
+
+[project.urls]
+"Homepage" = "https://example.com"
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
+build.verbose = true
+# デフォルト build ディレクトリ（任意）
+build-dir = "build"
+
+[tool.scikit-build.cmake.define]
+# C++17 を使う
+CMAKE_CXX_STANDARD = "17"
+CMAKE_CXX_STANDARD_REQUIRED = "ON"
+CMAKE_CXX_EXTENSIONS = "OFF"
+
+# pybind11 に Python を自動検出させる
+PYBIND11_FINDPYTHON = "ON"
