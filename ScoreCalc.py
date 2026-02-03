@@ -134,14 +134,16 @@ class AA_Score:
 
     def _run_AAScore(self, pocket_pdb, input_sdf, scores_file_path):
         #self.logger.info(f'start , {input_sdf}')
-        cwd = os.getcwd()
         poc = os.path.abspath(pocket_pdb)
         lig = os.path.abspath(input_sdf)
         log = os.path.abspath(scores_file_path)
-        os.chdir('/AA_Score_Tool')
-        os.system("python AA_Score.py --Rec "+poc+" --Lig "+lig+" --Out "+log)
+        
+        subprocess.run(
+            [sys.executable, "AA_Score.py", "--Rec", poc, "--Lig", lig, "--Out", log],
+            cwd='/AA_Score_Tool',
+            check=True
+        )
         self.logger.info(f'{input_sdf} done.')
-        os.chdir(cwd)
         return log
 
     def _summary(self, scores):

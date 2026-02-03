@@ -1,34 +1,22 @@
 ## input  : results.csv (obtained from ChemTS)
 ## output : lead_NNN/conformers.sdf
 
-import sys, os, shutil, subprocess, re
-import numpy as np
+import os, subprocess
 import pandas as pd
 import yaml
 
-from scipy.cluster.hierarchy import linkage, dendrogram
-import scipy.cluster.hierarchy as sch
-from scipy.spatial.distance import squareform
-
-from rdkit import Chem, DataStructs
-from rdkit.Chem import rdMolAlign, Descriptors, AllChem, PandasTools, rdMolDescriptors, Draw, rdmolops
-from rdkit.Chem.AllChem import AlignMol, EmbedMolecule, EmbedMultipleConfs
-from rdkit.Chem.rdForceFieldHelpers import UFFGetMoleculeForceField
-from openbabel import pybel
+from rdkit import Chem
+from rdkit.Chem import Descriptors, AllChem, PandasTools, rdMolDescriptors
 from glob import glob
 
-from Bio.PDB import PDBParser, PDBIO, Select
-from Bio.PDB.NeighborSearch import NeighborSearch
-import concurrent.futures
-
-from IPython.core.debugger import Pdb
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class Embed_Mols:
-    def __init__(self, trajectory_dirs, rank_output_dirs, is_neutral, config, logger):
-        self.trajectory_dirs = trajectory_dirs
+    def __init__(self, rank_output_dirs, config, logger):
         self.rank_output_dirs = rank_output_dirs
-        self.is_neutral = is_neutral
+        # 使っていないためコメントアウト
+        # geneerate_leadのインスタンス変数からもis_neutralを削除したので、もし必要ならば引数で受け取るように変更すること
+        # self.is_neutral = is_neutral
         self.conf = config
         self.outdir = self.conf['OUTPUT']['directory']
         self.workdir = os.path.join(self.outdir, self.conf['AAScore']['working_directory'])
@@ -38,7 +26,7 @@ class Embed_Mols:
     def run(self):
         #_run_a_rankを実行するoperator（各ChemTS結果毎に並列化）
         num_threads = int(self.conf['GENERAL']['use_num_threads'])
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
+        with ProcessPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.rank_output_dirs]
             for future in as_completed(futures):
                 try:
@@ -89,8 +77,8 @@ class Embed_Mols:
 
         # 中性化していた場合chargeを付与して戻す
         # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
-        #if not self.is_neutral:
-        #self.add_charge(output_path_prefix)
+        # if not self.is_neutral:
+        #     self.add_charge(output_path_prefix)
 
     def _compounds_select(self, csv, output_path_prefix):
         ## input  : results.csv (obtained from ChemTS)
@@ -381,13 +369,12 @@ class Embed_Mols:
 
 
 
-    """legacy, but useful for protonated molecules
-    def add_charge(self, conformers_path):
-        conformers = sorted(glob(os.path.join(conformers_path + '*', 'conformers_*.mol2')))
-        for conf in conformers:
-            # for debug->pdb,mol2は不要だよね。
-            # obabel -ipdb ${input}.pdb -opdb -O ${output}.pdb -ph 7.4
-            subprocess.run(['obabel', '-imol2', conf,'-omol2', '-O', conf, '-ph', '7.4'])
-            # rdkitではmol2扱いにくいのでpdbにしておく 
-            subprocess.run(['obabel', '-imol2', conf,'-opdb', '-O', conf.replace('mol2','pdb')])
-    """
+    # # legacy, but useful for protonated molecules
+    # def add_charge(self, conformers_path):
+    #     conformers = sorted(glob(os.path.join(conformers_path + '*', 'conformers_*.mol2')))
+    #     for conf in conformers:
+    #         # for debug->pdb,mol2は不要だよね。
+    #         # obabel -ipdb ${input}.pdb -opdb -O ${output}.pdb -ph 7.4
+    #         subprocess.run(['obabel', '-imol2', conf,'-omol2', '-O', conf, '-ph', '7.4'])
+    #         # rdkitではmol2扱いにくいのでpdbにしておく 
+    #         subprocess.run(['obabel', '-imol2', conf,'-opdb', '-O', conf.replace('mol2','pdb')])
