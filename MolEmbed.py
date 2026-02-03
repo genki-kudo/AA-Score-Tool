@@ -25,20 +25,21 @@ from IPython.core.debugger import Pdb
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class Embed_Mols:
-    def __init__(self, generate_lead, config):
-        self.gl = generate_lead
-        self.trajectory_dirs = self.gl.trajectory_dirs
+    def __init__(self, trajectory_dirs, rank_output_dirs, is_neutral, config, logger):
+        self.trajectory_dirs = trajectory_dirs
+        self.rank_output_dirs = rank_output_dirs
+        self.is_neutral = is_neutral
         self.conf = config
         self.outdir = self.conf['OUTPUT']['directory']
         self.workdir = os.path.join(self.outdir, self.conf['AAScore']['working_directory'])
         self.sinchodir = os.path.join(self.outdir, self.conf['SINCHO']['working_directory'])
-        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.outdir, self.conf['OUTPUT']['logs_dir'], 'Embed.log'))
+        self.logger = logger
 
     def run(self):
         #_run_a_rankを実行するoperator（各ChemTS結果毎に並列化）
         num_threads = int(self.conf['GENERAL']['use_num_threads'])
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_threads) as executor:
-            futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.gl.rank_output_dirs]
+            futures = [executor.submit(self._run_a_rank, rank_dir) for rank_dir in self.rank_output_dirs]
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -88,7 +89,7 @@ class Embed_Mols:
 
         # 中性化していた場合chargeを付与して戻す
         # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
-        #if not self.gl.is_neutral:
+        #if not self.is_neutral:
         #self.add_charge(output_path_prefix)
 
     def _compounds_select(self, csv, output_path_prefix):

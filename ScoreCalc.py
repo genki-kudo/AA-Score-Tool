@@ -25,11 +25,11 @@ class ResidueSelect(Select):
         
 
 class AA_Score:
-    def __init__(self, generate_lead, config):
-        self.gl = generate_lead
+    def __init__(self, rank_output_dirs, config, logger):
         self.conf = config
         self.output_dir = self.conf['OUTPUT']['directory'] 
         
+        self.rank_output_dirs = rank_output_dirs
         self.aascore_output_dirname = os.path.join(self.output_dir, 
                                                    self.conf['AAScore']['working_directory'])
         self.aascore_output_filename = 'scores.txt'
@@ -45,13 +45,13 @@ class AA_Score:
         self.max_workers = int(self.conf['GENERAL']['use_num_threads'])
         self.SDF_output_num = self.conf['AAScore']['output_num']           
         self.SDF_name_prefix = self.conf['AAScore']['OUTPUT']['sdf_name_prefix']
-        self.logger = self.gl.cm.setup_custom_logger('AAScore', os.path.join(self.output_dir, self.conf['OUTPUT']['logs_dir'], 'AAScore.log'))
+        self.logger = logger
 
     def run(self):
         os.makedirs(self.aascore_outdir, exist_ok = True)
 
         #生成(及びEmbed)のtrajectory-rankの候補を取得
-        chemts_trial_dirs = self.gl.rank_output_dirs
+        chemts_trial_dirs = self.rank_output_dirs
         scores = []
         for ct_dir in chemts_trial_dirs:
             #ct_dir ex. 'out_6Z0R/03_CompGen/trajectory_006/rank_01'
