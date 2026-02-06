@@ -1,4 +1,6 @@
 import sys, os, shutil, subprocess, re
+from pathlib import Path
+from typing import List, Dict, Any, Union
 import numpy as np
 import pandas as pd
 
@@ -14,7 +16,6 @@ from glob import glob
 from Bio.PDB import PDBParser, PDBIO, Select
 from Bio.PDB.NeighborSearch import NeighborSearch
 import concurrent.futures
-from IPython.core.debugger import Pdb
 
 class ResidueSelect(Select):
     def __init__(self, residues):
@@ -25,21 +26,17 @@ class ResidueSelect(Select):
         
 
 class AA_Score:
-    def __init__(self, rank_output_dirs, config, logger):
+    def __init__(self, rank_output_dirs: Union[List[str], List[Path]], config: Dict[str, Any], logger: Any):
         self.conf = config
-        self.output_dir = self.conf['OUTPUT']['directory'] 
+        self.output_dir = Path(self.conf['OUTPUT']['directory'])
         
-        self.rank_output_dirs = rank_output_dirs
-        self.aascore_output_dirname = os.path.join(self.output_dir, 
-                                                   self.conf['AAScore']['working_directory'])
+        self.rank_output_dirs = [Path(p) for p in rank_output_dirs]
+        
         self.aascore_output_filename = 'scores.txt'
-        self.generate_dir = os.path.join(self.conf['OUTPUT']['directory'],
-                                         self.conf['ChemTS']['working_directory']
-                                         )
-        self.sincho_dir = os.path.join(self.conf['OUTPUT']['directory'],
-                                       self.conf['SINCHO']['working_directory']
-                                       )
-        self.aascore_outdir = self.aascore_output_dirname
+        self.generate_dir = self.output_dir / self.conf['ChemTS']['working_directory']
+        self.sincho_dir = self.output_dir / self.conf['SINCHO']['working_directory']
+        self.aascore_outdir = self.output_dir / self.conf['AAScore']['working_directory']
+
         self.output_files = []
         self.rank_output_dir = []
         self.max_workers = int(self.conf['GENERAL']['use_num_threads'])
@@ -47,42 +44,58 @@ class AA_Score:
         self.SDF_name_prefix = self.conf['AAScore']['OUTPUT']['sdf_name_prefix']
         self.logger = logger
 
-    def run(self):
-        os.makedirs(self.aascore_outdir, exist_ok = True)
+    def run(self) -> None:
+        self.aascore_outdir.mkdir(parents=True, exist_ok=True)
 
         #生成(及びEmbed)のtrajectory-rankの候補を取得
         chemts_trial_dirs = self.rank_output_dirs
         scores = []
         for ct_dir in chemts_trial_dirs:
-            #ct_dir ex. 'out_6Z0R/03_CompGen/trajectory_006/rank_01'
-            aa_wdir = ct_dir.replace(self.generate_dir, self.aascore_outdir)
-            #aa_wdir ex. 'out_6Z0R/04_DeltaGEst/trajectory_006/rank_01'
-            aa_wdir_par = os.path.dirname(aa_wdir)
-            #sc_wdir_par ex. 'out_6Z0R/02_MakeDec/trajectory_006'
-            sc_wdir_par = aa_wdir_par.replace(self.aascore_outdir, self.sincho_dir)
+            # ct_dir ex. Path('out_6Z0R/03_CompGen/trajectory_006/rank_01')
+            try:
+                rel_path = ct_dir.relative_to(self.generate_dir)
+            except ValueError:
+                self.logger.error(f"Path mismatch: {ct_dir} is not relative to {self.generate_dir}")
+                continue
 
-            prot_name = f'prot_{ct_dir.split("/")[-2].split("_")[-1]}.pdb'
-            lig_name  = f'lig_{ct_dir.split("/")[-2].split("_")[-1]}.pdb'
-            prot_pdb   = os.path.join(aa_wdir_par, f'prot_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
-            lig_pdb    = os.path.join(aa_wdir_par, f'lig_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
-            pocket_pdb = os.path.join(aa_wdir_par, f'pocket_{ct_dir.split("/")[-2].split("_")[-1]}.pdb')
+            aa_wdir = self.aascore_outdir / rel_path
+            aa_wdir_par = aa_wdir.parent
+            
+            # sc_wdir_par ex. 'out_6Z0R/02_MakeDec/trajectory_006'
+            sc_wdir_par = self.sincho_dir / rel_path.parent
 
-            if not os.path.isfile(prot_pdb):
-                shutil.copy(os.path.join(sc_wdir_par, prot_name), aa_wdir_par)
-            if not os.path.isfile(lig_pdb):
-                shutil.copy(os.path.join(sc_wdir_par, lig_name), aa_wdir_par)
-            if not os.path.isfile(pocket_pdb):
+            # trajectory_num取得: .../trajectory_006/rank_01 -> trajectory_006 -> 006
+            traj_name_full = ct_dir.parent.name
+            traj_num = traj_name_full.split("_")[-1]
+
+            prot_name = f'prot_{traj_num}.pdb'
+            lig_name  = f'lig_{traj_num}.pdb'
+            
+            prot_pdb   = aa_wdir_par / prot_name
+            lig_pdb    = aa_wdir_par / lig_name
+            pocket_pdb = aa_wdir_par / f'pocket_{traj_num}.pdb'
+
+            aa_wdir_par.mkdir(parents=True, exist_ok=True)
+
+            if not prot_pdb.is_file():
+                shutil.copy(sc_wdir_par / prot_name, aa_wdir_par)
+            if not lig_pdb.is_file():
+                shutil.copy(sc_wdir_par / lig_name, aa_wdir_par)
+            if not pocket_pdb.is_file():
                 distance = self.conf['AAScore']['protein_range']
                 self._extract_residues_within_distance(prot_pdb, lig_pdb, pocket_pdb, distance=distance)
+            
             #AA実行
             self._processess(aa_wdir, pocket_pdb, scores)
+            
         #結果まとめ
         self._summary(scores)
 
-    def _extract_residues_within_distance(self, protein_pdb, compound_pdb, output_pdb, distance=13.0):
+    def _extract_residues_within_distance(self, protein_pdb: Path, compound_pdb: Path, output_pdb: Path, distance: float = 13.0) -> None:
+
         parser = PDBParser(QUIET=True)
-        protein_structure = parser.get_structure('protein', protein_pdb)
-        compound_structure = parser.get_structure('compound', compound_pdb)
+        protein_structure = parser.get_structure('protein', str(protein_pdb))
+        compound_structure = parser.get_structure('compound', str(compound_pdb))
         protein_atoms = list(protein_structure.get_atoms())
         compound_atoms = list(compound_structure.get_atoms())
         neighbor_search = NeighborSearch(protein_atoms)
@@ -107,17 +120,18 @@ class AA_Score:
         }
         io = PDBIO()
         io.set_structure(protein_structure)
-        io.save(output_pdb, ResidueSelect(close_residues))
+        io.save(str(output_pdb), ResidueSelect(close_residues))
         #print('save at', output_pdb)
 
-    def _processess(self, aa_wdir, pocket_pdb, scores):
-        lead_paths = glob(os.path.join(aa_wdir, 'lead_*'))
-        task_list = []
+    def _processess(self, aa_wdir: Path, pocket_pdb: Path, scores: List[Path]) -> None:
+        lead_paths = list(aa_wdir.glob('lead_*'))
+        task_list: List[List[Path]] = []
 
         for lead in lead_paths:
-            scores_file_path = os.path.join(lead, self.aascore_output_filename)
-            input_sdf = os.path.join(lead, 'conformers.sdf')
-            if os.path.isfile(input_sdf) and os.stat(input_sdf).st_size>0: #conformer.sdfが存在し、空(Embed失敗)でないもの
+            scores_file_path = lead / self.aascore_output_filename
+            input_sdf = lead / 'conformers.sdf'
+
+            if input_sdf.is_file() and input_sdf.stat().st_size > 0: #conformer.sdfが存在し、空(Embed失敗)でないもの
                 task_list.append([pocket_pdb, input_sdf, scores_file_path])
                 scores.append(scores_file_path)
 
@@ -132,58 +146,70 @@ class AA_Score:
                 except Exception as e:
                     self.logger.error(f"Error in parallel execution: {e}")
 
-    def _run_AAScore(self, pocket_pdb, input_sdf, scores_file_path):
-        #self.logger.info(f'start , {input_sdf}')
-        poc = os.path.abspath(pocket_pdb)
-        lig = os.path.abspath(input_sdf)
-        log = os.path.abspath(scores_file_path)
+    def _run_AAScore(self, pocket_pdb: Path, input_sdf: Path, scores_file_path: Path) -> Path:
         
         subprocess.run(
-            [sys.executable, "AA_Score.py", "--Rec", poc, "--Lig", lig, "--Out", log],
-            cwd='/AA_Score_Tool',
+            [sys.executable, "AA_Score.py", "--Rec", str(pocket_pdb.resolve()), "--Lig", str(input_sdf.resolve()), "--Out", str(scores_file_path.resolve())],
+            cwd='/AA_Score_Tool', # TODO: ハードコーディングを避ける
             check=True
         )
         self.logger.info(f'{input_sdf} done.')
-        return log
+        return scores_file_path.resolve()
 
-    def _summary(self, scores):
+    def _summary(self, scores: List[Path]) -> None:
         df_all = pd.DataFrame(columns=['ROMol', 'AAScore', 'trajectory_num', 'rank_num', 'lead_num', 'conf_num', 'num_heavyatoms', 'AAScore_LE'])
         
-        for n, each_cpd_log_file in enumerate(scores): #each_cpd_log_file: out_6Z0R/04_DeltaGEst/trajectory_006/rank_01/lead_01/scores.txt
+        for n, each_cpd_log_file in enumerate(scores): # each_cpd_log_file: out_6Z0R/04_DeltaGEst/trajectory_006/rank_01/lead_01/scores.txt
 
             df_aascore = pd.read_csv(each_cpd_log_file, names=['Name', 'score'], sep="\t").sort_values('score')
             #一番いいポーズのNameとスコアを取得
             top_conformer_name , top_conformer_score = df_aascore.loc[df_aascore["score"].idxmin(), ['Name','score']]
             top_conformer_num = top_conformer_name.split('_')[-1]
-            input_sdf = each_cpd_log_file.replace(self.aascore_output_filename, 'conformers.sdf')
-            best_pose = Chem.SDMolSupplier(input_sdf)[int(top_conformer_num)]
+            input_sdf = each_cpd_log_file.parent / 'conformers.sdf'
+            best_pose = Chem.SDMolSupplier(str(input_sdf))[int(top_conformer_num)]
             best_pose.SetProp('AAScore', str(top_conformer_score))
-            best_pose.SetProp('RootName', os.path.dirname(each_cpd_log_file))
-            writer = Chem.SDWriter(each_cpd_log_file.replace(self.aascore_output_filename, 'best_pose.sdf'))
+            best_pose.SetProp('RootName', str(each_cpd_log_file.parent))
+            output_best_pose = each_cpd_log_file.parent / 'best_pose.sdf'
+            writer = Chem.SDWriter(str(output_best_pose))
             writer.write(best_pose)
             writer.close()
 
-            #df_allに追加
-            sp_dir = each_cpd_log_file.split("/")
-            df_all.loc[str(n)] = [best_pose, float(top_conformer_score), sp_dir[-4], sp_dir[-3], sp_dir[-2], str(top_conformer_name), int(best_pose.GetNumHeavyAtoms()), float(top_conformer_score)/int(best_pose.GetNumHeavyAtoms())]
+            # df_allに追加
+            sp_dir = each_cpd_log_file.parts
+
+            df_all.loc[str(n)] = [
+                best_pose, 
+                float(top_conformer_score), 
+                sp_dir[-4], 
+                sp_dir[-3], 
+                sp_dir[-2], 
+                str(top_conformer_name), 
+                int(best_pose.GetNumHeavyAtoms()), 
+                float(top_conformer_score)/int(best_pose.GetNumHeavyAtoms())
+            ]
  
         #output
         df_all_sorted = df_all.sort_values('AAScore')
-        df_all_sorted.to_csv(os.path.join(self.aascore_outdir,"all.csv"), index=True)
+        df_all_sorted.to_csv(self.aascore_outdir / "all.csv", index=True)
+        
         df_top = df_all_sorted[:self.SDF_output_num]
-        df_top.to_csv(os.path.join(self.aascore_outdir,"top_5000.csv"), index=True)
-        all_sdf_out_file = os.path.join(self.aascore_outdir, 'all.sdf')
-        PandasTools.WriteSDF(df_all_sorted, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted.columns))
-        top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'.sdf')
-        PandasTools.WriteSDF(df_top, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top.columns))
+        df_top.to_csv(self.aascore_outdir / "top_5000.csv", index=True)
+        
+        all_sdf_out_file = self.aascore_outdir / 'all.sdf'
+        PandasTools.WriteSDF(df_all_sorted, str(all_sdf_out_file), molColName='ROMol' ,properties=list(df_all_sorted.columns))
+        
+        top_sdf_out_file = self.aascore_outdir / f'top_{self.SDF_output_num}.sdf'
+        PandasTools.WriteSDF(df_top, str(top_sdf_out_file), molColName='ROMol' ,properties=list(df_top.columns))
 
         #output
         df_all_sorted_le = df_all.sort_values('AAScore_LE')
-        df_all_sorted_le.to_csv(os.path.join(self.aascore_outdir,"all_le.csv"), index=True)
+        df_all_sorted_le.to_csv(self.aascore_outdir / "all_le.csv", index=True)
+        
         df_top_le = df_all_sorted_le[:self.SDF_output_num]
-        df_top_le.to_csv(os.path.join(self.aascore_outdir,"top_5000_le.csv"), index=True)
-        all_sdf_out_file = os.path.join(self.aascore_outdir, 'all_le.sdf')
-        PandasTools.WriteSDF(df_all_sorted_le, all_sdf_out_file, molColName='ROMol' ,properties=list(df_all_sorted_le.columns))
-        top_sdf_out_file = os.path.join(self.aascore_outdir, 'top_'+str(self.SDF_output_num)+'_le.sdf')
-        PandasTools.WriteSDF(df_top_le, top_sdf_out_file, molColName='ROMol' ,properties=list(df_top_le.columns))
-
+        df_top_le.to_csv(self.aascore_outdir / "top_5000_le.csv", index=True)
+        
+        all_sdf_out_file_le = self.aascore_outdir / 'all_le.sdf'
+        PandasTools.WriteSDF(df_all_sorted_le, str(all_sdf_out_file_le), molColName='ROMol' ,properties=list(df_all_sorted_le.columns))
+        
+        top_sdf_out_file_le = self.aascore_outdir / f'top_{self.SDF_output_num}_le.sdf'
+        PandasTools.WriteSDF(df_top_le, str(top_sdf_out_file_le), molColName='ROMol' ,properties=list(df_top_le.columns))

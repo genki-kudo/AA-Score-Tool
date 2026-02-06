@@ -2,9 +2,12 @@
 ## output : lead_NNN/conformers.sdf
 
 import os, subprocess
+import logging
+from typing import List, Dict, Any, Tuple, Optional, Union
 import pandas as pd
 import yaml
 
+from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem, PandasTools, rdMolDescriptors
 from glob import glob
@@ -12,18 +15,18 @@ from glob import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class Embed_Mols:
-    def __init__(self, rank_output_dirs, config, logger):
-        self.rank_output_dirs = rank_output_dirs
+    def __init__(self, rank_output_dirs: Union[List[str], List[Path]], config: Dict[str, Any], logger: logging.Logger) -> None:
+        self.rank_output_dirs = [Path(d) for d in rank_output_dirs]
         # 使っていないためコメントアウト
         # geneerate_leadのインスタンス変数からもis_neutralを削除したので、もし必要ならば引数で受け取るように変更すること
         # self.is_neutral = is_neutral
         self.conf = config
-        self.outdir = self.conf['OUTPUT']['directory']
-        self.workdir = os.path.join(self.outdir, self.conf['AAScore']['working_directory'])
-        self.sinchodir = os.path.join(self.outdir, self.conf['SINCHO']['working_directory'])
+        self.outdir = Path(self.conf['OUTPUT']['directory'])
+        self.workdir = self.outdir / self.conf['AAScore']['working_directory']
+        self.sinchodir = self.outdir / self.conf['SINCHO']['working_directory']
         self.logger = logger
 
-    def run(self):
+    def run(self) -> None:
         #_run_a_rankを実行するoperator（各ChemTS結果毎に並列化）
         num_threads = int(self.conf['GENERAL']['use_num_threads'])
         with ProcessPoolExecutor(max_workers=num_threads) as executor:
@@ -34,21 +37,20 @@ class Embed_Mols:
                 except Exception as e:
                     self.logger.error(f"Thread failed: {e}")
     
-    def _run_a_rank(self, rank_dir):
+    def _run_a_rank(self, rank_dir: Path) -> None:
         # ディレクトリ・ファイルの定義
-        self.logger.info(rank_dir)
-        trajectory_name = rank_dir.split("/")[-2].split("_")[0]
-        trajectory_num = rank_dir.split("/")[-2].split("_")[1]
-        tdir = rank_dir.split("/")[-2]
-        rdir = rank_dir.split("/")[-1]
-        csv_file = os.path.join(rank_dir, 'results.csv')
-        parent_dir = os.path.join(self.workdir, tdir, rdir)
-        os.makedirs(parent_dir, exist_ok=True)
-        output_path_prefix = os.path.join(parent_dir, 'lead')
+        self.logger.info(str(rank_dir))
+        tdir = rank_dir.parent.name
+        trajectory_num = tdir.split("_")[1]
+        rdir = rank_dir.name
+        csv_file = rank_dir / 'results.csv'
+        parent_dir = self.workdir / tdir / rdir
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        output_path_prefix = parent_dir / 'lead'
                 
         # yaml記述の条件下で、results.csvからlead.xlsxを作成,df生成
         # Embedする化合物を選択している。method: randなら生成群からランダムに選択されdf_choiceに渡される
-        df_choice = self._compounds_select(csv=csv_file, output_path_prefix=output_path_prefix)
+        df_choice = self._compounds_select(results_csv_path=csv_file, output_path_prefix=output_path_prefix)
 
         # df_choiceの化合物数からインデックス付けのスケールを決定
         # もしdf_choiceがNoneまたは空ならば、_run_a_rankを終了
@@ -60,8 +62,8 @@ class Embed_Mols:
         
         # 各compoundについて3次元構造生成
         # まずhitのセットアップ # 反応点チェック
-        core_pdb = os.path.join(self.sinchodir, tdir, 'lig_'+trajectory_num+'.pdb')
-        with open(os.path.join(self.sinchodir, tdir, 'sincho_result.yaml'),'r')as f:
+        core_pdb = self.sinchodir / tdir / f'lig_{trajectory_num}.pdb'
+        with open(str(self.sinchodir / tdir / 'sincho_result.yaml'), 'r') as f:
             sincho_res = yaml.safe_load(f)
         anchor_atomname = str(sincho_res['SINCHO_result'][rdir]['atom_num']).split('_')[-1]
 
@@ -71,16 +73,15 @@ class Embed_Mols:
 
         # 各構造でコンフォーマー生成のループ
         for idx, row in df_choice.iterrows():
-            confgen_output_path = output_path_prefix+'_'+str(idx).zfill(ncpd_scale)
-            self._conf_gen(idx=idx, row=row, output_path=confgen_output_path,
-                            core_mol=core_mol, core_wc_mol=core_wc_mol, smarts=smarts, confgen_output_path=confgen_output_path)
+            confgen_output_path = output_path_prefix.parent / f"{output_path_prefix.name}_{str(idx).zfill(ncpd_scale)}"
+            self._conf_gen(row=row, output_path=confgen_output_path, core_wc_mol=core_wc_mol, smarts=smarts, confgen_output_path=confgen_output_path)
 
         # 中性化していた場合chargeを付与して戻す
         # 途中からの計算時に落ちる。全部やっても構わないため分岐無に変更(2025/06/05 kudo)
         # if not self.is_neutral:
         #     self.add_charge(output_path_prefix)
 
-    def _compounds_select(self, csv, output_path_prefix):
+    def _compounds_select(self, results_csv_path: Path, output_path_prefix: Path) -> Optional[pd.DataFrame]:
         ## input  : results.csv (obtained from ChemTS)
         ## output : choice_to_docking.csv, lead.xlsx (with 2D images)
         # mols: モルオブジェクト
@@ -90,7 +91,7 @@ class Embed_Mols:
         if choice_method == 'rand':
             num_of_cpd = self.conf['AAScore']['num_of_cpd']
         reward_cutoff = self.conf['AAScore']['reward_cutoff']
-        df = pd.read_csv(csv)
+        df = pd.read_csv(str(results_csv_path))
         if len(df)==0:
             return
         # 物性値をdfに追記
@@ -105,13 +106,14 @@ class Embed_Mols:
         else:
             df_choice = df_rew.reset_index(drop=True)
         df_choice['Choice_idx'] = [ i for i in range(len(df_choice)) ]
-        df_choice.drop('mols', axis=1).reset_index(drop=False).to_csv(os.path.join(os.path.dirname(csv), 'choice_to_docking.csv'))
+        df_choice.drop('mols', axis=1).reset_index(drop=False).to_csv(str(results_csv_path.parent / 'choice_to_docking.csv'))
         
         if 'mols' in df_choice.columns and df_choice['mols'].notna().any():
-            PandasTools.SaveXlsxFromFrame(df_choice, output_path_prefix+'.xlsx', molCol='mols', size=(150,150))
+            xlsx_path = output_path_prefix.parent / f"{output_path_prefix.name}.xlsx"
+            PandasTools.SaveXlsxFromFrame(df_choice, str(xlsx_path), molCol='mols', size=(150,150))
         df_choice['mhs'] = [ Chem.AddHs(m) for m in df_choice['mols'] ]
-        return df_choice  
-    def _calc_df_properties(self, df):
+        return df_choice
+    def _calc_df_properties(self, df: pd.DataFrame) -> pd.DataFrame:
         ## input  : dataframe
         ## output : dataframe with properties
         # propertiesにはmolオブジェクトも含まれた状態
@@ -126,8 +128,8 @@ class Embed_Mols:
         df['acceptor'] = [rdMolDescriptors.CalcNumLipinskiHBA(m) for m in df['mols']]
         return df
     
-    def _core_def(self, pdb_path, label):
-        mol = Chem.MolFromPDBFile(pdb_path, removeHs=False, sanitize=False)
+    def _core_def(self, pdb_path: Union[str, Path], label: str) -> Tuple[Chem.Mol, Chem.Mol, str]:
+        mol = Chem.MolFromPDBFile(str(pdb_path), removeHs=False, sanitize=False)
         pdbmol = mol
         #coreのmolオブジェクトにpdb内で使用されている原子ラベルをPropertiesとして追加
         for atom in mol.GetAtoms():
@@ -171,10 +173,10 @@ class Embed_Mols:
         smarts = smarts.replace("-[*]", "[*]")  # ← 結合タイプを「柔らかく」する
         return pdbmol, mol_final, smarts
  
-    def _conf_gen(self, idx, row, output_path, core_mol, core_wc_mol, smarts, confgen_output_path):
+    def _conf_gen(self, row: pd.Series, output_path: Path, core_wc_mol: Chem.Mol, smarts: str, confgen_output_path: Path) -> None:
         # input  : row and idx in dataframe
         # output : conformations
-        os.makedirs(output_path, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
         self.logger.info(confgen_output_path)
         smiles_b = row['smiles']
         #object立ち上げ
@@ -254,7 +256,7 @@ class Embed_Mols:
         self._embed_confs(target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path)
         return
     
-    def _is_only_modified_at_wildcard(self, query, target, match):
+    def _is_only_modified_at_wildcard(self, query: Chem.Mol, target: Chem.Mol, match: List[Tuple[int, int]]) -> bool:
         # query中のワイルドカードのindex（AtomicNum=0）
         wildcard_qidx = [a.GetIdx() for a in query.GetAtoms() if a.GetAtomicNum() == 0]
         if not wildcard_qidx:
@@ -291,7 +293,7 @@ class Embed_Mols:
             return False
 
 
-    def _embed_confs(self, target, coord_map, n_conf, max_attempts, rms_thresh, confgen_output_path):
+    def _embed_confs(self, target: Chem.Mol, coord_map: Dict[int, Any], n_conf: int, max_attempts: float, rms_thresh: float, confgen_output_path: Path) -> None:
         generated, attempts = 0,0
         heavy_atoms = [atom.GetIdx() for atom in target.GetAtoms() if atom.GetAtomicNum()>1]
         self.logger.info(f"target index max = {max([atom.GetIdx() for atom in target.GetAtoms()])}")
@@ -338,7 +340,7 @@ class Embed_Mols:
             if is_unique:
                 generated+=1
 
-        writer = Chem.SDWriter(os.path.join(confgen_output_path, 'conformers.sdf'))
+        writer = Chem.SDWriter(str(confgen_output_path / 'conformers.sdf'))
         for cid,conf in enumerate(target.GetConformers()):
             conf_id = conf.GetId()
             conf_mol = Chem.Mol(target)
@@ -351,7 +353,7 @@ class Embed_Mols:
 
         return
 
-    def _rms_no_align(self, mol, confId1, confId2, atom_indices=None):
+    def _rms_no_align(self, mol: Chem.Mol, confId1: int, confId2: int, atom_indices: Optional[Union[List[int], range]] = None) -> float:
         conf1 = mol.GetConformer(confId1)
         conf2 = mol.GetConformer(confId2)
         if atom_indices is None:
