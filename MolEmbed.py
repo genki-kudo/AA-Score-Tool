@@ -1,7 +1,6 @@
 ## input  : results.csv (obtained from ChemTS)
 ## output : lead_NNN/conformers.sdf
 
-import os, subprocess
 import logging
 from typing import List, Dict, Any, Tuple, Optional, Union
 import pandas as pd
@@ -10,7 +9,6 @@ import yaml
 from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem, PandasTools, rdMolDescriptors
-from glob import glob
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 

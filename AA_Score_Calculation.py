@@ -83,8 +83,7 @@ class Embed_Mols:
             rdir = output_rank_dir.split("/")[-1]
             csv_path = os.path.join(output_rank_dir, 'results.csv')
             output_path_prefix = os.path.join(self.conf['OUTPUT']['directory'], self.conf['AAScore']['working_directory'], trajectory_name+'_'+trajectory_num, rdir, 'lead')
-            os.makedirs(os.path.join(self.conf['OUTPUT']['directory'], self
-.conf['AAScore']['working_directory'], trajectory_name+'_'+trajectory_num, rdir), exist_ok=True)
+            os.makedirs(os.path.join(self.conf['OUTPUT']['directory'], self.conf['AAScore']['working_directory'], trajectory_name+'_'+trajectory_num, rdir), exist_ok=True)
 
             #output_path_prefix = os.path.join(output_rank_dir, 'lead')
             input_compound_file = os.path.join(self.outdir, self.conf['SINCHO']['working_directory'], trajectory_name+'_'+trajectory_num, 'lig_'+trajectory_num+'.pdb')
@@ -104,7 +103,7 @@ class Embed_Mols:
 
     def csv_to_mol2(self, csv, output_path_prefix, ligand_pdb):
         aascore_conf = self.conf['AAScore']
-        choise_method = aascore_conf['method']
+        choice_method = aascore_conf['method']
         reward_cutoff = aascore_conf['reward_cutoff']
         num_of_cpd = aascore_conf['num_of_cpd']
         noc_order_scale = int(len(str(int(num_of_cpd)))+1)
@@ -127,7 +126,7 @@ class Embed_Mols:
         
         # randならシャッフルして指定個数
         # all(rand以外)なら順に全て
-        if choise_method == 'rand':
+        if choice_method == 'rand':
             if len(df) >= num_of_cpd:
                 df = df.sample(frac=1)[:num_of_cpd].reset_index(drop=True)
             else:
@@ -135,11 +134,11 @@ class Embed_Mols:
         else:
             df = df.reset_index(drop=True)
 
-        df.drop('mols', axis=1).reset_index(drop=False).to_csv(os.path.join(os.path.dirname(csv), 'choise_to_docking.csv'))
+        df.drop('mols', axis=1).reset_index(drop=False).to_csv(os.path.join(os.path.dirname(csv), 'choice_to_docking.csv'))
 
         # create ID
         df_rows_scale = int(len(str(len(df)))+1)
-        if choise_method == 'all':
+        if choice_method == 'all':
             noc_order_scale = df_rows_scale
         df['ChemTS_idx'] = ['ChemTS_'+str(i).zfill(df_rows_scale) for i in range(len(df))]
 
@@ -267,11 +266,11 @@ class Embed_Mols:
     def remove_similar_conformers_from_clustering(self, conformers, energies, conf_per_cpd):
         rmsd_mtx = self.calc_rmsd_matrix(conformers)
         centers, labels = self.make_dendrogram(rmsd_mtx, n_clusters=conf_per_cpd)
-        choise_conformers = [conformers[i] for i in centers]
-        choise_conformers_energy = [energies[i] for i in centers]
-        # choise_conformers_label = [labels[i] for i in centers]
+        choice_conformers = [conformers[i] for i in centers]
+        choice_conformers_energy = [energies[i] for i in centers]
+        # choice_conformers_label = [labels[i] for i in centers]
 
-        return choise_conformers, choise_conformers_energy
+        return choice_conformers, choice_conformers_energy
 
     def make_dendrogram(self, rmsd_mtx, n_clusters=10):  
         upper_triangle_values = rmsd_mtx[np.triu_indices(rmsd_mtx.shape[0], k=1)]  # k=1 で対角成分を除外

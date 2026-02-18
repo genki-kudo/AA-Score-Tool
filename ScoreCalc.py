@@ -50,43 +50,47 @@ class AA_Score:
         #生成(及びEmbed)のtrajectory-rankの候補を取得
         chemts_trial_dirs = self.rank_output_dirs
         scores = []
-        for ct_dir in chemts_trial_dirs:
-            # ct_dir ex. Path('out_6Z0R/03_CompGen/trajectory_006/rank_01')
-            try:
-                rel_path = ct_dir.relative_to(self.generate_dir)
-            except ValueError:
-                self.logger.error(f"Path mismatch: {ct_dir} is not relative to {self.generate_dir}")
-                continue
+        
+        # 修正前はループ内でExecutorを作成していたが、頻繁な作成・破棄により
+        # OSError: handle is closed が発生したため、ループ外で一度だけ作成するように変更
+        with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            for ct_dir in chemts_trial_dirs:
+                # ct_dir ex. Path('out_6Z0R/03_CompGen/trajectory_006/rank_01')
+                try:
+                    rel_path = ct_dir.relative_to(self.generate_dir)
+                except ValueError:
+                    self.logger.error(f"Path mismatch: {ct_dir} is not relative to {self.generate_dir}")
+                    continue
 
-            aa_wdir = self.aascore_outdir / rel_path
-            aa_wdir_par = aa_wdir.parent
-            
-            # sc_wdir_par ex. 'out_6Z0R/02_MakeDec/trajectory_006'
-            sc_wdir_par = self.sincho_dir / rel_path.parent
+                aa_wdir = self.aascore_outdir / rel_path
+                aa_wdir_par = aa_wdir.parent
+                
+                # sc_wdir_par ex. 'out_6Z0R/02_MakeDec/trajectory_006'
+                sc_wdir_par = self.sincho_dir / rel_path.parent
 
-            # trajectory_num取得: .../trajectory_006/rank_01 -> trajectory_006 -> 006
-            traj_name_full = ct_dir.parent.name
-            traj_num = traj_name_full.split("_")[-1]
+                # trajectory_num取得: .../trajectory_006/rank_01 -> trajectory_006 -> 006
+                traj_name_full = ct_dir.parent.name
+                traj_num = traj_name_full.split("_")[-1]
 
-            prot_name = f'prot_{traj_num}.pdb'
-            lig_name  = f'lig_{traj_num}.pdb'
-            
-            prot_pdb   = aa_wdir_par / prot_name
-            lig_pdb    = aa_wdir_par / lig_name
-            pocket_pdb = aa_wdir_par / f'pocket_{traj_num}.pdb'
+                prot_name = f'prot_{traj_num}.pdb'
+                lig_name  = f'lig_{traj_num}.pdb'
+                
+                prot_pdb   = aa_wdir_par / prot_name
+                lig_pdb    = aa_wdir_par / lig_name
+                pocket_pdb = aa_wdir_par / f'pocket_{traj_num}.pdb'
 
-            aa_wdir_par.mkdir(parents=True, exist_ok=True)
+                aa_wdir_par.mkdir(parents=True, exist_ok=True)
 
-            if not prot_pdb.is_file():
-                shutil.copy(sc_wdir_par / prot_name, aa_wdir_par)
-            if not lig_pdb.is_file():
-                shutil.copy(sc_wdir_par / lig_name, aa_wdir_par)
-            if not pocket_pdb.is_file():
-                distance = self.conf['AAScore']['protein_range']
-                self._extract_residues_within_distance(prot_pdb, lig_pdb, pocket_pdb, distance=distance)
-            
-            #AA実行
-            self._processess(aa_wdir, pocket_pdb, scores)
+                if not prot_pdb.is_file():
+                    shutil.copy(sc_wdir_par / prot_name, aa_wdir_par)
+                if not lig_pdb.is_file():
+                    shutil.copy(sc_wdir_par / lig_name, aa_wdir_par)
+                if not pocket_pdb.is_file():
+                    distance = self.conf['AAScore']['protein_range']
+                    self._extract_residues_within_distance(prot_pdb, lig_pdb, pocket_pdb, distance=distance)
+                
+                #AA実行
+                self._processess(aa_wdir, pocket_pdb, scores, executor)
             
         #結果まとめ
         self._summary(scores)
@@ -123,7 +127,7 @@ class AA_Score:
         io.save(str(output_pdb), ResidueSelect(close_residues))
         #print('save at', output_pdb)
 
-    def _processess(self, aa_wdir: Path, pocket_pdb: Path, scores: List[Path]) -> None:
+    def _processess(self, aa_wdir: Path, pocket_pdb: Path, scores: List[Path], executor: concurrent.futures.ProcessPoolExecutor) -> None:
         lead_paths = list(aa_wdir.glob('lead_*'))
         task_list: List[List[Path]] = []
 
@@ -136,21 +140,19 @@ class AA_Score:
                 scores.append(scores_file_path)
 
         # 並列処理の実行
-        max_workers = self.max_workers
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._run_AAScore, *args) for args in task_list]
-            # すべてのタスクが完了するのを待つ（エラーチェック含む）
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()  # 例外があればここでキャッチされる
-                except Exception as e:
-                    self.logger.error(f"Error in parallel execution: {e}")
+        futures = [executor.submit(self._run_AAScore, *args) for args in task_list]
+        # すべてのタスクが完了するのを待つ（エラーチェック含む）
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()  # 例外があればここでキャッチされる
+            except Exception as e:
+                self.logger.error(f"Error in parallel execution: {e}")
 
     def _run_AAScore(self, pocket_pdb: Path, input_sdf: Path, scores_file_path: Path) -> Path:
         
         subprocess.run(
             [sys.executable, "AA_Score.py", "--Rec", str(pocket_pdb.resolve()), "--Lig", str(input_sdf.resolve()), "--Out", str(scores_file_path.resolve())],
-            cwd='/AA_Score_Tool', # TODO: ハードコーディングを避ける
+            cwd='/AA_Score_Tool',
             check=True
         )
         self.logger.info(f'{input_sdf} done.')
